@@ -83,14 +83,14 @@ You are on your last cycle and no longer have any tool calls available. You must
 # Reminder message that replaces the usual reminder if web_search was the last tool call
 OPEN_URL_REMINDER = """
 Remember that after using web_search, you are encouraged to open some pages to get more context unless the query is completely answered by the snippets.
-Open the pages that look the most promising and high quality by calling the open_url tool with an array of URLs. Open as many as you want.
+Open the most promising, high-quality pages with `open_url`; it takes many URLs at once.
 
 If you do have enough to answer, remember to provide INLINE citations using the "document" field in the format [1], [2], [3], etc.
 """.strip()
 
 
 IMAGE_GEN_REMINDER = """
-Very briefly describe the image(s) generated. Do not include any links or attachments.
+The user already sees the generated image(s). Do not link or embed them. Continue the task if needed; otherwise briefly describe them.
 """.strip()
 
 

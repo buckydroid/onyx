@@ -2,7 +2,6 @@ import React, { JSX, memo } from "react";
 import {
   ChatPacket,
   isCodeInterpreterToolType,
-  ImageGenerationToolPacket,
   Packet,
   PacketType,
   ReasoningPacket,
@@ -21,7 +20,7 @@ import { MessageTextRenderer } from "./renderers/MessageTextRenderer";
 import { ImageToolRenderer } from "./renderers/ImageToolRenderer";
 import { PythonToolRenderer } from "./timeline/renderers/code/PythonToolRenderer";
 import { CodingAgentRenderer } from "./timeline/renderers/code/CodingAgentRenderer";
-import { isCodingAgentPackets } from "./timeline/packetHelpers";
+import { isCodingAgentPackets, isNestedPacket } from "./timeline/packetHelpers";
 import { ReasoningRenderer } from "./timeline/renderers/reasoning/ReasoningRenderer";
 import CustomToolRenderer from "./renderers/CustomToolRenderer";
 import { FileReaderToolRenderer } from "./timeline/renderers/filereader/FileReaderToolRenderer";
@@ -117,110 +116,52 @@ function isResearchAgentPacket(packet: Packet) {
 export function findRenderer(
   groupedPackets: GroupedPackets
 ): MessageRenderer<any, any> | null {
-  // Check for chat messages first
-  if (groupedPackets.packets.some((packet) => isChatPacket(packet))) {
+  // A group holds the packets of its own call and of any nested calls. Only
+  // the parent-level packets decide the renderer.
+  const packets = groupedPackets.packets.filter((p) => !isNestedPacket(p));
+
+  if (packets.some(isChatPacket)) {
     return MessageTextRenderer;
   }
-
-  // Check for deep research packets EARLY - these have priority over other tools
-  // because deep research groups may contain multiple packet types (plan + reasoning + fetch)
-  if (
-    groupedPackets.packets.some((packet) => isDeepResearchPlanPacket(packet))
-  ) {
+  // Deep research groups can also hold reasoning and fetch packets.
+  if (packets.some(isDeepResearchPlanPacket)) {
     return DeepResearchPlanRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isResearchAgentPacket(packet))) {
+  if (packets.some(isResearchAgentPacket)) {
     return ResearchAgentRenderer;
   }
-  if (isCodingAgentPackets(groupedPackets.packets)) {
+  if (isCodingAgentPackets(packets)) {
     return CodingAgentRenderer;
   }
-
-  // Standard tool checks
-  if (groupedPackets.packets.some((packet) => isWebSearchPacket(packet))) {
+  if (packets.some(isWebSearchPacket)) {
     return WebSearchToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isInternalSearchPacket(packet))) {
+  if (packets.some(isInternalSearchPacket)) {
     return InternalSearchToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isImageToolPacket(packet))) {
+  if (packets.some(isImageToolPacket)) {
     return ImageToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isPythonToolPacket(packet))) {
+  if (packets.some(isPythonToolPacket)) {
     return PythonToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isFileReaderToolPacket(packet))) {
+  if (packets.some(isFileReaderToolPacket)) {
     return FileReaderToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isCustomToolPacket(packet))) {
+  if (packets.some(isCustomToolPacket)) {
     return CustomToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isFetchToolPacket(packet))) {
+  if (packets.some(isFetchToolPacket)) {
     return FetchToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isMemoryToolPacket(packet))) {
+  if (packets.some(isMemoryToolPacket)) {
     return MemoryToolRenderer;
   }
-  if (groupedPackets.packets.some((packet) => isReasoningPacket(packet))) {
+  // SECTION_END and ERROR match here, so this check must stay last.
+  if (packets.some(isReasoningPacket)) {
     return ReasoningRenderer;
   }
   return null;
-}
-
-// Handles display groups containing both chat text and image generation packets
-function MixedContentHandler({
-  chatPackets,
-  imagePackets,
-  chatState,
-  messageNodeId,
-  hasTimelineThinking,
-  onComplete,
-  animate,
-  restoredTextLength,
-  stopPacketSeen,
-  stopReason,
-  children,
-}: {
-  chatPackets: Packet[];
-  imagePackets: Packet[];
-  chatState: FullChatState;
-  messageNodeId?: number;
-  hasTimelineThinking?: boolean;
-  onComplete: () => void;
-  animate: boolean;
-  restoredTextLength?: number;
-  stopPacketSeen: boolean;
-  stopReason?: StopReason;
-  children: (result: RendererOutput) => JSX.Element;
-}) {
-  return (
-    <MessageTextRenderer
-      packets={chatPackets as ChatPacket[]}
-      state={chatState}
-      messageNodeId={messageNodeId}
-      hasTimelineThinking={hasTimelineThinking}
-      onComplete={() => {}}
-      animate={animate}
-      restoredTextLength={restoredTextLength}
-      renderType={RenderType.FULL}
-      stopPacketSeen={stopPacketSeen}
-      stopReason={stopReason}
-    >
-      {(textResults) => (
-        <ImageToolRenderer
-          packets={imagePackets as ImageGenerationToolPacket[]}
-          state={chatState}
-          onComplete={onComplete}
-          animate={animate}
-          renderType={RenderType.FULL}
-          stopPacketSeen={stopPacketSeen}
-          stopReason={stopReason}
-        >
-          {(imageResults) => children([...textResults, ...imageResults])}
-        </ImageToolRenderer>
-      )}
-    </MessageTextRenderer>
-  );
 }
 
 // Props interface for RendererComponent
@@ -267,47 +208,6 @@ export const RendererComponent = memo(function RendererComponent({
   stopReason,
   children,
 }: RendererComponentProps) {
-  // Detect mixed display groups (both chat text and image generation)
-  const hasChatPackets = packets.some((p) => isChatPacket(p));
-  const hasImagePackets = packets.some((p) => isImageToolPacket(p));
-
-  if (hasChatPackets && hasImagePackets) {
-    const sharedTypes = new Set<string>([
-      PacketType.SECTION_END,
-      PacketType.ERROR,
-    ]);
-
-    const chatPackets = packets.filter(
-      (p) =>
-        isChatPacket(p) ||
-        p.obj.type === PacketType.CITATION_INFO ||
-        sharedTypes.has(p.obj.type as string)
-    );
-    const imagePackets = packets.filter(
-      (p) =>
-        isImageToolPacket(p) ||
-        p.obj.type === PacketType.IMAGE_GENERATION_TOOL_DELTA ||
-        sharedTypes.has(p.obj.type as string)
-    );
-
-    return (
-      <MixedContentHandler
-        chatPackets={chatPackets}
-        imagePackets={imagePackets}
-        chatState={chatState}
-        messageNodeId={messageNodeId}
-        hasTimelineThinking={hasTimelineThinking}
-        onComplete={onComplete}
-        animate={animate}
-        restoredTextLength={restoredTextLength}
-        stopPacketSeen={stopPacketSeen}
-        stopReason={stopReason}
-      >
-        {children}
-      </MixedContentHandler>
-    );
-  }
-
   const RendererFn = findRenderer({ packets });
 
   if (!RendererFn) {

@@ -7,6 +7,7 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
+from onyx.chat.citation_utils import result_cites_documents
 from onyx.chat.models import (
     ChatPrompt,
     ChatReminderContext,
@@ -20,6 +21,10 @@ from onyx.chat.prompt_formatting import (
     count_message_tokens,
     prepare_model_messages,
     prompt_metadata,
+)
+from onyx.chat.tool_results import (
+    omitted_result_text,
+    tool_result_parts,
 )
 from onyx.context.models import UserMemoryContext
 from onyx.context.search.models import SearchDocsResponse
@@ -48,7 +53,6 @@ from onyx.prompts.chat_prompts import (
     LAST_CYCLE_CITATION_REMINDER,
     OPEN_URL_REMINDER,
     REQUIRE_CITATION_GUIDANCE,
-    TOOL_CALL_RESPONSE_CROSS_MESSAGE,
 )
 from onyx.prompts.prompt_utils import (
     apply_prompt_placeholders,
@@ -56,8 +60,10 @@ from onyx.prompts.prompt_utils import (
     substitute_user_placeholders,
 )
 from onyx.prompts.tool_prompts import (
+    CODE_MODE_GUIDANCE,
     GENERATE_IMAGE_GUIDANCE,
     INTERNAL_SEARCH_GUIDANCE,
+    INTERNAL_SEARCH_QUERY_LIMIT,
     MEMORY_GUIDANCE,
     OPEN_URLS_GUIDANCE,
     PYTHON_TOOL_GUIDANCE,
@@ -78,12 +84,14 @@ from onyx.prompts.user_info import (
     USER_PREFERENCES_PROMPT,
     USER_ROLE_PROMPT,
 )
-from onyx.tools.constants import CITEABLE_TOOLS_NAMES, FILE_READER_TOOL_NAME
+from onyx.tools.constants import CODE_MODE_TOOL_NAME, FILE_READER_TOOL_NAME
 from onyx.tools.interface import Tool
 from onyx.tools.models import LlmPythonExecutionResult
+from onyx.tools.tool_implementations.code_mode.prompt import earlier_cell_calls
 from onyx.tools.tool_implementations.images.image_generation_tool import (
     ImageGenerationTool,
 )
+from onyx.tools.tool_implementations.images.models import FinalImageGenerationResponse
 from onyx.tools.tool_implementations.memory.memory_tool import MemoryTool
 from onyx.tools.tool_implementations.open_url.open_url_tool import OpenURLTool
 from onyx.tools.tool_implementations.python.python_tool import PythonTool
@@ -95,6 +103,11 @@ from onyx.utils.timing import log_function_time
 logger = setup_logger()
 
 
+def callable_tools(tools: Sequence[Tool]) -> list[Tool]:
+    """The offered tools, then the tools that run inside their calls."""
+    return [*tools, *(inner for tool in tools for inner in tool.inner_tools)]
+
+
 def build_chat_reminder(
     context: ChatReminderContext,
     results: Sequence[ToolResultMessage],
@@ -102,34 +115,41 @@ def build_chat_reminder(
     *,
     enabled: bool,
 ) -> str | None:
+    """`results` are this turn's tool results; `previous_results` the last step's."""
     if not enabled:
         return context.persona_task_prompt
     reminder_text = context.persona_task_prompt
-    if context.ran_image_gen:
-        reminder_text = IMAGE_GEN_REMINDER
     # Only suggest opening URLs when this agent has the tool.
-    elif (
+    if (
         context.has_open_url_tool
         and not context.out_of_cycles
         and any(
-            result.tool_name == WebSearchTool.NAME
-            and isinstance(result.details, SearchDocsResponse)
-            and result.details.search_docs
+            part.tool_name == WebSearchTool.NAME
+            and isinstance(part.details, SearchDocsResponse)
+            and part.details.search_docs
             for result in previous_results
+            for part in tool_result_parts(result)
         )
     ):
         reminder_text = OPEN_URL_REMINDER
     return build_reminder_message(
         reminder_text=reminder_text,
         include_citation_reminder=any(
-            result.tool_name in CITEABLE_TOOLS_NAMES for result in results
+            result_cites_documents(result) for result in results
         )
         or context.has_context_documents,
         include_file_reminder=any(
-            result.tool_name == PythonTool.NAME
-            and isinstance(result.details, LlmPythonExecutionResult)
-            and result.details.generated_files
+            part.tool_name == PythonTool.NAME
+            and isinstance(part.details, LlmPythonExecutionResult)
+            and part.details.generated_files
             for result in results
+            for part in tool_result_parts(result)
+        ),
+        include_image_reminder=any(
+            isinstance(part.details, FinalImageGenerationResponse)
+            and part.details.generated_images
+            for result in results
+            for part in tool_result_parts(result)
         ),
         is_last_cycle=context.out_of_cycles,
     )
@@ -148,7 +168,6 @@ def build_chat_prompt(
     results: Sequence[ToolResultMessage],
     previous_results: Sequence[ToolResultMessage],
     is_last_step: bool,
-    ran_image_gen: bool,
 ) -> ChatPrompt:
     """Select instructions and reminders before assembling conversation history."""
     values = memory.user_info.placeholder_values if memory else {}
@@ -161,8 +180,7 @@ def build_chat_prompt(
     persona_task = substitute(persona.task_prompt if persona else None)
     context_documents = bool(files.use_as_search_filter or files.file_texts)
     cite = (
-        reminders_enabled
-        and any(result.tool_name in CITEABLE_TOOLS_NAMES for result in results)
+        reminders_enabled and any(result_cites_documents(result) for result in results)
     ) or context_documents
     datetime_aware = persona.datetime_aware if persona else True
 
@@ -200,8 +218,9 @@ def build_chat_prompt(
         custom = None
     reminder = build_chat_reminder(
         ChatReminderContext(
-            ran_image_gen=ran_image_gen,
-            has_open_url_tool=any(isinstance(tool, OpenURLTool) for tool in tools),
+            has_open_url_tool=any(
+                isinstance(tool, OpenURLTool) for tool in callable_tools(tools)
+            ),
             out_of_cycles=is_last_step,
             persona_task_prompt=render(persona_task, citations=cite),
             has_context_documents=context_documents,
@@ -302,6 +321,7 @@ def build_reminder_message(
     reminder_text: str | None,
     include_citation_reminder: bool,
     include_file_reminder: bool,
+    include_image_reminder: bool,
     is_last_cycle: bool,
 ) -> str | None:
     reminder = reminder_text.strip() if reminder_text else ""
@@ -322,6 +342,8 @@ def build_reminder_message(
         reminder += "\n\n" + ANSWER_COMPLETENESS_REMINDER
     if include_file_reminder:
         reminder += "\n\n" + FILE_REMINDER
+    if include_image_reminder:
+        reminder += "\n\n" + IMAGE_GEN_REMINDER
     reminder = reminder.strip()
     return reminder or None
 
@@ -454,6 +476,9 @@ def build_system_prompt(
     """Should only be called with the default behavior system prompt.
     If the user has replaced the default behavior prompt with their custom agent prompt, do not call this function.
 
+    `tools` are the offered tools. Tools that run inside their calls, such as code
+    mode functions, get their guidance too, and the prompt names them as functions.
+
     With include_user_info=False the per-user block is left out so the result is
     byte-identical across users; emit it separately via build_user_information_prompt.
     The org-wide framing (and company context) for that block stays here.
@@ -479,7 +504,7 @@ def build_system_prompt(
     if include_all_guidance:
         tool_sections = [
             TOOL_DESCRIPTION_SEARCH_GUIDANCE,
-            INTERNAL_SEARCH_GUIDANCE,
+            INTERNAL_SEARCH_GUIDANCE + INTERNAL_SEARCH_QUERY_LIMIT,
             WEB_SEARCH_GUIDANCE.format(
                 site_colon_disabled=WEB_SEARCH_SITE_DISABLED_GUIDANCE
             ),
@@ -492,6 +517,10 @@ def build_system_prompt(
         return system_prompt
 
     if tools:
+        code_mode = any(tool.name == CODE_MODE_TOOL_NAME for tool in tools)
+        # Inner tools are functions of a code mode program, not direct tools.
+        tools = callable_tools(tools)
+        tool_guidance_sections: list[str] = [CODE_MODE_GUIDANCE] if code_mode else []
         has_web_search = any(isinstance(tool, WebSearchTool) for tool in tools)
         has_internal_search = any(isinstance(tool, SearchTool) for tool in tools)
         has_open_urls = any(isinstance(tool, OpenURLTool) for tool in tools)
@@ -501,14 +530,16 @@ def build_system_prompt(
         )
         has_memory = any(isinstance(tool, MemoryTool) for tool in tools)
 
-        tool_guidance_sections: list[str] = []
-
         if has_web_search or has_internal_search or include_all_guidance:
             tool_guidance_sections.append(TOOL_DESCRIPTION_SEARCH_GUIDANCE)
 
         # These are not included at the Tool level because the ordering may matter.
         if has_internal_search or include_all_guidance:
-            tool_guidance_sections.append(INTERNAL_SEARCH_GUIDANCE)
+            tool_guidance_sections.append(
+                INTERNAL_SEARCH_GUIDANCE
+                if code_mode
+                else INTERNAL_SEARCH_GUIDANCE + INTERNAL_SEARCH_QUERY_LIMIT
+            )
 
         if has_web_search or include_all_guidance:
             site_disabled_guidance = ""
@@ -601,12 +632,15 @@ def prepare_prompt(
     # Nested payloads stay read-only until output formatting detaches them.
     history = [message.model_copy() for message in messages]
     _deduplicate_search_passages(history)
+    cell_calls = earlier_cell_calls(history)
     for message in history:
         metadata = prompt_metadata(message).model_copy()
         message.metadata = metadata
         if isinstance(message, ToolResultMessage) and metadata.omit_tool_result_content:
-            # Keep stored evidence intact; later questions use the existing placeholder.
-            message.content = TOOL_CALL_RESPONSE_CROSS_MESSAGE
+            # Keep stored evidence intact; later questions read a placeholder.
+            message.content = omitted_result_text(
+                message, cell_calls.get(message.tool_call_id, [])
+            )
             metadata.token_count = None
         metadata.token_count = count_message_tokens(message, token_counter)
         metadata.should_cache = not metadata.is_reminder

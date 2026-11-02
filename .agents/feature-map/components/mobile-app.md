@@ -29,7 +29,8 @@ source selection stay on the device.
 The user cannot regenerate or edit a message, give feedback, compare models,
 use voice, or take a photo with the camera. Tool activity (search, code,
 image generation, deep research, memory) shows as an empty step in the
-timeline. Only the answer text and reasoning render.
+timeline. Only the answer text, reasoning and generated images render; the
+images show as thumbnails above the answer text.
 
 After an answer ends, Send stays disabled until the server confirms that the
 session is idle. A send that the server does not accept keeps its draft.
@@ -115,7 +116,10 @@ processor of the web app. Packets group by `getGroupKey` (`turn_index` and
 `tab_index`). The backend closes each answer, reasoning and tool group with
 `section_end`, also on Stop. `injectSectionEnd` closes groups that are still
 open when a new turn starts or on `stop`, for a stream that ends on a root
-error or a dropped connection. Two hooks differ from web because the mobile
+error or a dropped connection. As on web ([[chat-frontend]]), after the answer
+starts only a tool packet that opens a new group takes the answer back; a late
+packet of a known group, such as a code mode closing record, does not. Two hooks
+differ from web because the mobile
 lint forbids reading refs during render: `usePacketProcessor` regroups in a
 `useMemo`, and `usePacedTurnGroups` keeps pacing state in effects.
 

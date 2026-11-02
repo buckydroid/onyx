@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny
 
-from onyx.agents.models import ExecutionStatus, RunStatus
+from onyx.agents.models import ExecutionStatus, RunFailure, RunOutcome
 from onyx.agents.tools import PendingToolInput, ToolProgress
 from onyx.llm.models import (
     AssistantMessage,
@@ -29,6 +29,7 @@ class AgentEventType(str, Enum):
     TOOL_START = "tool_start"
     TOOL_UPDATE = "tool_update"
     TOOL_END = "tool_end"
+    TOOL_RESULT_AMENDED = "tool_result_amended"
 
 
 class _Event(BaseModel):
@@ -59,9 +60,8 @@ class InputRequiredEvent(_AgentEvent):
 
 class AgentEndEvent(_AgentEvent):
     type: Literal[AgentEventType.AGENT_END] = AgentEventType.AGENT_END
-    outcome: Literal[
-        RunStatus.COMPLETE, RunStatus.LIMIT, RunStatus.CANCELLED, RunStatus.ERROR
-    ]
+    outcome: RunOutcome
+    failure: RunFailure | None = None
 
 
 class _MessageEvent(_AgentEvent):
@@ -102,6 +102,16 @@ class ToolEndEvent(_MessageEvent):
     result: ToolResult
 
 
+class ToolResultAmendedEvent(_MessageEvent):
+    """The run's finish hook replaced the recorded result of an ended call."""
+
+    type: Literal[AgentEventType.TOOL_RESULT_AMENDED] = (
+        AgentEventType.TOOL_RESULT_AMENDED
+    )
+    tool_call: ToolCall
+    result: ToolResult
+
+
 AgentEvent = Annotated[
     AgentStartEvent
     | AgentSuspendedEvent
@@ -112,7 +122,8 @@ AgentEvent = Annotated[
     | MessageEndEvent
     | ToolStartEvent
     | ToolUpdateEvent
-    | ToolEndEvent,
+    | ToolEndEvent
+    | ToolResultAmendedEvent,
     Field(discriminator="type"),
 ]
 

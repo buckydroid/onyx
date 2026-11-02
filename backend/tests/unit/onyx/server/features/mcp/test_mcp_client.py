@@ -1,9 +1,13 @@
+import asyncio
+import threading
+import time
 from collections.abc import Coroutine
 from typing import Any
 
 import pytest
 from mcp import ClientSession
 
+from onyx.llm.cancellation import AgentCancelled, CancellationSignal
 from onyx.server.features.mcp import client
 from onyx.server.features.mcp.oauth import MCPReauthenticationRequired
 
@@ -116,3 +120,34 @@ def test_runtime_keeps_raw_unauthorized_response(
         client._call_mcp_client_function_sync(operation, "https://mcp.example.com")
     assert error.value is upstream
     assert client.has_unauthorized_response(error.value)
+
+
+def test_cancellation_stops_a_running_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    stopped = threading.Event()
+
+    async def slow_call() -> None:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            stopped.set()
+            raise
+
+    async def operation(_session: ClientSession) -> None:
+        raise AssertionError("the runner is replaced")
+
+    monkeypatch.setattr(
+        client,
+        "_create_mcp_client_function_runner",
+        lambda *_args, **_kwargs: slow_call,
+    )
+    cancellation = CancellationSignal()
+    threading.Timer(0.1, cancellation.cancel).start()
+    started = time.monotonic()
+
+    with pytest.raises(AgentCancelled):
+        client._call_mcp_client_function_sync(
+            operation, "https://mcp.example.com/mcp", cancellation=cancellation
+        )
+
+    assert time.monotonic() - started < 5
+    assert stopped.is_set()

@@ -3,6 +3,7 @@
    replays idempotent and consumers need the state in the same commit. */
 import { useRef, useState, useMemo, useCallback } from "react";
 import {
+  GeneratedImage,
   Packet,
   StreamingCitation,
   StopReason,
@@ -16,6 +17,8 @@ import {
   processPackets,
 } from "@/app/app/message/messageComponents/timeline/hooks/packetProcessor";
 import {
+  expandCodeModeSteps,
+  isCodeModeWorking,
   transformPacketGroups,
   groupStepsByTurn,
   TurnGroup,
@@ -26,6 +29,8 @@ export interface UsePacketProcessorResult {
   toolGroups: GroupedPacket[];
   displayGroups: GroupedPacket[];
   toolTurnGroups: TurnGroup[];
+  /** A code mode program works between tool calls; it has no step. */
+  codeModeWorking: boolean;
   citations: StreamingCitation[];
   citationMap: CitationMap;
   documentMap: Map<string, OnyxDocument>;
@@ -34,14 +39,13 @@ export interface UsePacketProcessorResult {
   stopPacketSeen: boolean;
   stopReason: StopReason | undefined;
   hasSteps: boolean;
-  isGeneratingImage: boolean;
-  generatedImageCount: number;
+  generatedImages: GeneratedImage[];
   // Whether final answer is coming (MESSAGE_START seen)
   finalAnswerComing: boolean;
   // Tool processing duration from backend (via MESSAGE_START packet)
   toolProcessingDuration: number | undefined;
 
-  // Completion: stopPacketSeen && renderComplete
+  // Completion: stopped, and the answer (if any) finished rendering
   isComplete: boolean;
 
   // Callbacks
@@ -118,9 +122,12 @@ export function usePacketProcessor(
   ]);
 
   // Transform toolGroups to timeline format
-  const toolTurnGroups = useMemo(() => {
-    const allSteps = transformPacketGroups(state.toolGroups);
-    return groupStepsByTurn(allSteps);
+  const { toolTurnGroups, codeModeWorking } = useMemo(() => {
+    const steps = transformPacketGroups(state.toolGroups);
+    return {
+      toolTurnGroups: groupStepsByTurn(expandCodeModeSteps(steps)),
+      codeModeWorking: isCodeModeWorking(steps),
+    };
   }, [state.toolGroups]);
 
   // Callback reads from ref: always current value, no ref needed in component
@@ -139,6 +146,7 @@ export function usePacketProcessor(
     toolGroups: state.toolGroups,
     displayGroups,
     toolTurnGroups,
+    codeModeWorking: codeModeWorking && !state.stopPacketSeen,
     citations: state.citations,
     citationMap: state.citationMap,
     documentMap: state.documentMap,
@@ -147,13 +155,15 @@ export function usePacketProcessor(
     stopPacketSeen: state.stopPacketSeen,
     stopReason: state.stopReason,
     hasSteps: toolTurnGroups.length > 0,
-    isGeneratingImage: state.isGeneratingImage,
-    generatedImageCount: state.generatedImageCount,
+    generatedImages: state.generatedImages,
     finalAnswerComing: state.finalAnswerComing,
     toolProcessingDuration: state.toolProcessingDuration,
 
-    // Completion: stopPacketSeen && renderComplete
-    isComplete: state.stopPacketSeen && renderComplete,
+    // Completion: the stream stopped, and the answer finished rendering or
+    // there is no answer to render
+    isComplete:
+      state.stopPacketSeen &&
+      (renderComplete || state.potentialDisplayGroups.length === 0),
 
     // Callbacks
     onRenderComplete,

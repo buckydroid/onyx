@@ -45,6 +45,7 @@ from onyx.llm.models import (
     UserMessage,
 )
 from onyx.server.query_and_chat.streaming_models import OverallStop, Packet
+from onyx.tools.constants import PYTHON_TOOL_NAME
 from onyx.tools.models import ChatFile
 from onyx.tools.tool_implementations.search.search_tool import SearchTool
 from onyx.tools.tool_implementations.web_search.web_search_tool import WebSearchTool
@@ -184,6 +185,16 @@ def test_chat_preserves_parallel_tool_history_forcing_and_packets(
     assert isinstance(packets[-1].obj, OverallStop)
 
 
+class _PythonTool(EchoTool):
+    @property
+    def id(self) -> int:
+        return 2
+
+    @property
+    def name(self) -> str:
+        return PYTHON_TOOL_NAME
+
+
 def test_chat_preserves_search_filters_in_accepted_result_and_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -295,9 +306,10 @@ def test_cancelled_source_file_staging_drains_before_completion(
             )
         ]
     )
+    # Files of found documents are staged only for the Python tool.
     agent = ChatAgent(
         [],
-        [EchoTool()],
+        [EchoTool(), _PythonTool()],
         None,
         "",
         ExtractedContextFiles(

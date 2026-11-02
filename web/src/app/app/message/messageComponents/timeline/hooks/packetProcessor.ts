@@ -7,7 +7,7 @@ import {
   SearchToolDocumentsDelta,
   FetchToolDocuments,
   Stop,
-  ImageGenerationToolDelta,
+  GeneratedImage,
   MessageStart,
   ToolCallArgumentDelta,
   isCodeInterpreterToolType,
@@ -23,6 +23,14 @@ import {
   getToolKey,
   parseToolKey,
 } from "@/app/app/message/messageComponents/toolDisplayHelpers";
+import {
+  asStandalonePacket,
+  isCodeModePacket,
+  isGroupEndPacket,
+  isNestedPacket,
+  NestedCallGroup,
+  nestedCallGroups,
+} from "@/app/app/message/messageComponents/timeline/packetHelpers";
 
 // Re-export parseToolKey for consumers that import from this module
 export { parseToolKey };
@@ -45,6 +53,9 @@ export interface ProcessorState {
 
   // Packet grouping
   groupedPacketsMap: Map<string, Packet[]>;
+  // Nested calls of each group by sub_turn_index, placed at parent level once
+  // per packet
+  nestedCallsMap: Map<string, Map<number, Packet[]>>;
   seenGroupKeys: Set<string>;
   groupKeysWithSectionEnd: Set<string>;
 
@@ -52,9 +63,9 @@ export interface ProcessorState {
   toolGroupKeys: Set<string>;
   displayGroupKeys: Set<string>;
 
-  // Image generation status
-  isGeneratingImage: boolean;
-  generatedImageCount: number;
+  // Images from every image generation call, nested calls included, in
+  // arrival order and unique by file_id
+  generatedImages: GeneratedImage[];
 
   // Streaming status
   finalAnswerComing: boolean;
@@ -73,6 +84,8 @@ export interface GroupedPacket {
   turn_index: number;
   tab_index: number;
   packets: Packet[];
+  /** The tool calls nested under this group, ordered by sub_turn_index. */
+  nestedCalls: NestedCallGroup[];
 }
 
 // ============================================================================
@@ -88,12 +101,12 @@ export function createInitialState(nodeId: number): ProcessorState {
     citationMap: {},
     documentMap: new Map(),
     groupedPacketsMap: new Map(),
+    nestedCallsMap: new Map(),
     seenGroupKeys: new Set(),
     groupKeysWithSectionEnd: new Set(),
     toolGroupKeys: new Set(),
     displayGroupKeys: new Set(),
-    isGeneratingImage: false,
-    generatedImageCount: 0,
+    generatedImages: [],
     finalAnswerComing: false,
     stopPacketSeen: false,
     stopReason: undefined,
@@ -148,6 +161,7 @@ const CONTENT_PACKET_TYPES_SET = new Set<PacketType>([
 
 function hasContentPackets(packets: Packet[]): boolean {
   return packets.some((packet) => {
+    if (isCodeModePacket(packet)) return true;
     const type = packet.obj.type as PacketType;
     if (type === PacketType.TOOL_CALL_ARGUMENT_DELTA) {
       return isCodeInterpreterToolType(
@@ -164,8 +178,6 @@ function hasContentPackets(packets: Packet[]): boolean {
 const FINAL_ANSWER_PACKET_TYPES_SET = new Set<PacketType>([
   PacketType.MESSAGE_START,
   PacketType.MESSAGE_DELTA,
-  PacketType.IMAGE_GENERATION_TOOL_START,
-  PacketType.IMAGE_GENERATION_TOOL_DELTA,
 ]);
 
 // ============================================================================
@@ -234,12 +246,34 @@ function handleDocumentPacket(state: ProcessorState, packet: Packet): void {
   }
 }
 
+function handleImagePacket(state: ProcessorState, packet: Packet): void {
+  if (packet.obj.type !== PacketType.IMAGE_GENERATION_TOOL_DELTA) {
+    return;
+  }
+  const delta = packet.obj;
+  const seenFileIds = new Set(state.generatedImages.map((i) => i.file_id));
+  const newImages: GeneratedImage[] = [];
+  for (const image of delta.images ?? []) {
+    if (seenFileIds.has(image.file_id)) continue;
+    seenFileIds.add(image.file_id);
+    newImages.push(image);
+  }
+  if (newImages.length > 0) {
+    // A new array, so memoized consumers see the change
+    state.generatedImages = [...state.generatedImages, ...newImages];
+  }
+}
+
 function handleStreamingStatusPacket(
   state: ProcessorState,
   packet: Packet
 ): void {
-  // Check if final answer is coming
-  if (FINAL_ANSWER_PACKET_TYPES_SET.has(packet.obj.type as PacketType)) {
+  // A nested message (for example, inside a research agent) belongs to its
+  // parent step, not the answer.
+  if (
+    FINAL_ANSWER_PACKET_TYPES_SET.has(packet.obj.type as PacketType) &&
+    !isNestedPacket(packet)
+  ) {
     state.finalAnswerComing = true;
   }
 
@@ -273,15 +307,17 @@ function handleStopPacket(state: ProcessorState, packet: Packet): void {
 
 function handleToolAfterMessagePacket(
   state: ProcessorState,
-  packet: Packet
+  packet: Packet,
+  opensToolGroup: boolean
 ): void {
-  // Handles case where we get a Message packet from Claude, and then tool
-  // calling packets. We use isActualToolCallPacket instead of isToolPacket
-  // to exclude reasoning packets - reasoning is just the model thinking,
-  // not an actual tool call that would produce new content.
+  // The model can write a message and then call a tool, so the answer is not
+  // final yet. Only a tool packet that opens a new group is a new call: later
+  // packets of a known group (such as a code mode cell's closing record) are
+  // not. Reasoning is not a tool call.
   if (
     state.finalAnswerComing &&
     !state.stopPacketSeen &&
+    opensToolGroup &&
     isActualToolCallPacket(packet)
   ) {
     state.finalAnswerComing = false;
@@ -299,6 +335,14 @@ function addPacketToGroup(
   } else {
     state.groupedPacketsMap.set(groupKey, [packet]);
   }
+
+  const subTurnIndex = packet.placement.sub_turn_index;
+  if (subTurnIndex === undefined || subTurnIndex === null) return;
+  const calls = state.nestedCallsMap.get(groupKey) ?? new Map();
+  state.nestedCallsMap.set(groupKey, calls);
+  const call = calls.get(subTurnIndex) ?? [];
+  call.push(asStandalonePacket(packet));
+  calls.set(subTurnIndex, call);
 }
 
 // ============================================================================
@@ -318,11 +362,8 @@ function processPacket(state: ProcessorState, packet: Packet): void {
   );
   state.seenGroupKeys.add(groupKey);
 
-  // Track SECTION_END and ERROR packets (both indicate completion)
-  if (
-    packet.obj.type === PacketType.SECTION_END ||
-    packet.obj.type === PacketType.ERROR
-  ) {
+  // Track the packets that end a group (same rule as isToolComplete)
+  if (isGroupEndPacket(packet)) {
     state.groupKeysWithSectionEnd.add(groupKey);
   }
 
@@ -330,35 +371,27 @@ function processPacket(state: ProcessorState, packet: Packet): void {
   addPacketToGroup(state, packet, groupKey);
 
   // Debug and control packets can precede the first rendered packet.
+  let opensToolGroup = false;
   if (
     !state.toolGroupKeys.has(groupKey) &&
     !state.displayGroupKeys.has(groupKey)
   ) {
     if (isToolPacket(packet, false)) {
       state.toolGroupKeys.add(groupKey);
+      opensToolGroup = true;
     }
     if (isDisplayPacket(packet)) {
       state.displayGroupKeys.add(groupKey);
     }
   }
 
-  // Track image generation for header display (regardless of group position)
-  if (packet.obj.type === PacketType.IMAGE_GENERATION_TOOL_START) {
-    state.isGeneratingImage = true;
-  }
-
-  // Count generated images from DELTA packets
-  if (packet.obj.type === PacketType.IMAGE_GENERATION_TOOL_DELTA) {
-    const delta = packet.obj as ImageGenerationToolDelta;
-    state.generatedImageCount += delta.images?.length ?? 0;
-  }
-
   // Handle specific packet types
+  handleImagePacket(state, packet);
   handleCitationPacket(state, packet);
   handleDocumentPacket(state, packet);
   handleStreamingStatusPacket(state, packet);
   handleStopPacket(state, packet);
-  handleToolAfterMessagePacket(state, packet);
+  handleToolAfterMessagePacket(state, packet, opensToolGroup);
 }
 
 export function processPackets(
@@ -447,7 +480,16 @@ function buildGroupsFromKeys(
       const { turn_index, tab_index } = parseToolKey(key);
       const packets = state.groupedPacketsMap.get(key);
       // Spread to create new array reference - ensures React detects changes for re-renders
-      return packets ? { turn_index, tab_index, packets: [...packets] } : null;
+      return packets
+        ? {
+            turn_index,
+            tab_index,
+            packets: [...packets],
+            nestedCalls: nestedCallGroups(
+              state.nestedCallsMap.get(key) ?? new Map()
+            ),
+          }
+        : null;
     })
     .filter(
       (g): g is GroupedPacket => g !== null && hasContentPackets(g.packets)

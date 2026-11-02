@@ -23,6 +23,7 @@ from onyx.llm.models import (
     Message,
     ToolCall,
     ToolDefinition,
+    ToolResult,
     ToolResultMessage,
 )
 
@@ -40,6 +41,11 @@ class RunStatus(str, Enum):
         return self not in (RunStatus.RUNNING, RunStatus.SUSPENDED)
 
 
+RunOutcome = Literal[
+    RunStatus.COMPLETE, RunStatus.LIMIT, RunStatus.CANCELLED, RunStatus.ERROR
+]
+
+
 class ExecutionStatus(str, Enum):
     """State of one generation or tool invocation; running means no terminal outcome yet."""
 
@@ -54,6 +60,7 @@ class RunFailureKind(str, Enum):
     LLM_TIMEOUT = "llm_timeout"
     LLM_RATE_LIMIT = "llm_rate_limit"
     EXECUTION = "execution"
+    DEADLINE = "deadline"
 
 
 class RunFailure(BaseModel):
@@ -135,6 +142,13 @@ class PreparedStep(BaseModel):
             tools=[tool.definition.model_copy(deep=True) for tool in self.tools],
             options=self.options.model_copy(deep=True),
         )
+
+
+class ToolResultAmendment(BaseModel):
+    """A replacement for the recorded result of one tool call of the finishing run."""
+
+    call_id: str
+    result: ToolResult
 
 
 class ToolCallContext(BaseModel):

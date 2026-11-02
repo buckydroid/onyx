@@ -428,3 +428,185 @@ test("a failed streaming answer stops its existing autoplay session", async () =
   );
   expect(mockStopTTS).toHaveBeenCalledTimes(1);
 });
+
+test("an answer stopped at the turn deadline says so", async () => {
+  seedSessionAwaitingAnswer();
+  render(
+    <AgentMessage
+      rawPackets={[
+        ...answerPackets.slice(0, -1),
+        {
+          placement,
+          obj: { type: PacketType.STOP, stop_reason: StopReason.TIMED_OUT },
+        },
+      ]}
+      chatState={chatState}
+      nodeId={NEW_ANSWER_NODE_ID}
+      llmManager={null}
+      hideFooter
+      disableTTS
+    />
+  );
+
+  expect(
+    await screen.findByText(
+      "The response stopped because it reached its time limit."
+    )
+  ).toBeInTheDocument();
+  expect(screen.getByText("A quick answer.")).toBeInTheDocument();
+});
+
+test("code mode reads as the tool calls it makes", async () => {
+  seedSessionAwaitingAnswer();
+  const cell = { turn_index: 0, tab_index: 0 };
+  const waited = { turn_index: 1, tab_index: 0 };
+  const lookup = (at: typeof cell, done: boolean): Packet[] => [
+    {
+      placement: { ...at, sub_turn_index: 0 },
+      obj: { type: PacketType.CUSTOM_TOOL_START, tool_name: "lookup_orders" },
+    },
+    ...(done
+      ? ([
+          {
+            placement: { ...at, sub_turn_index: 0 },
+            obj: {
+              type: PacketType.CUSTOM_TOOL_DELTA,
+              tool_name: "lookup_orders",
+              response_type: "text",
+              data: "3 orders",
+            },
+          },
+          {
+            placement: { ...at, sub_turn_index: 0 },
+            obj: { type: PacketType.SECTION_END },
+          },
+        ] as Packet[])
+      : []),
+  ];
+  const answer = { turn_index: 2, tab_index: 0 };
+  const packets: Packet[] = [
+    {
+      placement: cell,
+      obj: { type: PacketType.CODE_MODE_START, code: "await lookup_orders()" },
+    },
+    ...lookup(cell, false),
+    {
+      placement: cell,
+      obj: {
+        type: PacketType.CODE_MODE_DELTA,
+        stdout: "started\n",
+        status: "running",
+        cell_id: 1,
+        observation: 0,
+      },
+    },
+    { placement: cell, obj: { type: PacketType.SECTION_END } },
+    {
+      placement: waited,
+      obj: {
+        type: PacketType.CODE_MODE_START,
+        code: "",
+        cell_id: 1,
+        observation: 1,
+      },
+    },
+    ...lookup(waited, true),
+    {
+      placement: waited,
+      obj: {
+        type: PacketType.CODE_MODE_DELTA,
+        stdout: "done\n",
+        status: "completed",
+        cell_id: 1,
+        observation: 1,
+      },
+    },
+    { placement: waited, obj: { type: PacketType.SECTION_END } },
+    {
+      placement: answer,
+      obj: {
+        type: PacketType.MESSAGE_START,
+        id: "answer",
+        content: "",
+        final_documents: null,
+      },
+    },
+    {
+      placement: answer,
+      obj: { type: PacketType.MESSAGE_DELTA, content: "You have 3 orders." },
+    },
+    {
+      placement: answer,
+      obj: { type: PacketType.STOP, stop_reason: StopReason.FINISHED },
+    },
+  ];
+  const view = render(
+    <AgentMessage
+      rawPackets={packets}
+      packetCount={packets.length}
+      restoredPacketCount={packets.length}
+      chatState={chatState}
+      nodeId={NEW_ANSWER_NODE_ID}
+      llmManager={null}
+      hideFooter
+      disableTTS
+    />
+  );
+  try {
+    expect(await screen.findByText("You have 3 orders.")).toBeInTheDocument();
+    // One cell, observed twice, made one call.
+    expect(screen.getByText("1 step")).toBeInTheDocument();
+    await act(async () => {
+      screen.getByRole("button", { name: "Expand timeline" }).click();
+    });
+    const timeline = view.container;
+    await waitFor(() =>
+      expect(screen.getAllByText(/lookup_orders/)).toHaveLength(1)
+    );
+    expect(timeline).not.toHaveTextContent(
+      /Ran code|cell|continues|started|await lookup_orders|Analyz/i
+    );
+  } finally {
+    view.unmount();
+    useChatSessionStore.setState({
+      currentSessionId: null,
+      sessions: new Map(),
+    });
+  }
+});
+
+test("a program without tool calls shows only a working header", async () => {
+  seedSessionAwaitingAnswer();
+  const cell = { turn_index: 0, tab_index: 0 };
+  const running: Packet[] = [
+    {
+      placement: cell,
+      obj: { type: PacketType.CODE_MODE_START, code: "print(sum(range(9)))" },
+    },
+    {
+      placement: cell,
+      obj: { type: PacketType.CODE_MODE_DELTA, stdout: "36\n" },
+    },
+  ];
+  const view = render(
+    <AgentMessage
+      rawPackets={running}
+      packetCount={running.length}
+      chatState={chatState}
+      nodeId={NEW_ANSWER_NODE_ID}
+      llmManager={null}
+      hideFooter
+      disableTTS
+    />
+  );
+  try {
+    expect(await screen.findByText("Working")).toBeInTheDocument();
+    expect(view.container).not.toHaveTextContent(/36|sum\(range|step/i);
+  } finally {
+    view.unmount();
+    useChatSessionStore.setState({
+      currentSessionId: null,
+      sessions: new Map(),
+    });
+  }
+});

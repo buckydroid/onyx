@@ -20,7 +20,7 @@ from onyx.db.models import MCPServer
 from onyx.llm.cancellation import CancellationSignal
 from onyx.llm.models import ToolDefinition, ToolResult
 from onyx.tools.interface import Tool
-from onyx.tools.models import ToolContext
+from onyx.tools.models import CodeModeExposure, ToolContext
 from onyx.tools.tool_constructor import _disambiguate_mcp_tool_names
 from onyx.tools.tool_implementations.mcp.mcp_tool import (
     MCPTool,
@@ -96,6 +96,10 @@ class _StaticTool(Tool):
     @property
     def display_name(self) -> str:
         return self._name
+
+    @property
+    def code_mode_exposure(self) -> CodeModeExposure:
+        return CodeModeExposure.IMMEDIATE
 
     def tool_definition(self) -> ToolDefinition:
         return ToolDefinition(

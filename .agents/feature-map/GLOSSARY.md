@@ -173,7 +173,8 @@ mobile code checks for it. See [[streaming-protocol]].
 
 | Term | Meaning |
 |---|---|
-| Step / cycle | One model generation and the tool calls it requests. A chat response has up to `MAX_LLM_CYCLES` of them. See [[agent-runtime]]. |
+| Step / cycle | One model generation and the tool calls it requests. A chat response has up to `MAX_LLM_CYCLES` of them (default 100, a safety cap); the last one offers no tools, so the model must answer. See [[agent-runtime]] and [[core-chat-loop]]. |
+| Cell / observation (code mode) | A cell is one running code mode program; it can outlive the tool call that started it, but not its response. An observation is one `execute_code` or `wait_code` call on a cell: it reports what the cell did in one time window and saves one `CodeModeExecutionResult` (`cell_id`, `observation` 0, 1, ...). See [[code-execution]]. |
 | Run | One execution of an agent on the shared runtime (`agents/runtime.py:Run`). Its `RunState` records the input, steps, outcome and child runs. In a session that keeps content, a chat response's root run ID is its assistant `ChatMessage` ID. A content-free incognito run uses generated IDs. See [[agent-runtime#run-id-is-message-id]]. |
 | Stream ID | The key that the processing fence, the stop fence and the stream buffer share. See [[core-chat-loop]]. |
 | Presenter and renderer | `ResponsePresenter` and `MessageRenderer` turn runtime events into packets. They never drive execution. See [[core-chat-loop#presentation-does-not-drive-execution]]. |
@@ -181,7 +182,6 @@ mobile code checks for it. See [[streaming-protocol]].
 | Reminder | A trailing message with one or two critical instructions. See [[context-assembly]]. |
 | Custom agent prompt | The agent's instructions, sent as a user message near the newest user message. See [[context-assembly]]. |
 | Fence (chat) | A per-session cache flag. The stop fence (`chat/stop_signal_checker.py`, keyed by session and stream ID) means the user pressed Stop. The processing fence holds 0 after admission and the live stream ID after `ChatTurnAdmission.publish`. The admission owner key, not a fence, marks a busy session. The per-response keys in `chat/run_store.py:ChatRunStore` are not fences: `chat_response_owner` is the execution lease, and `chat_response_stop` is the flag that `cancel_run` sets when a parent cancels a child agent. See [[core-chat-loop#session-admission]]. |
-| Stopping tool | A tool after which the next step offers no tools, such as `generate_image`. See [[core-chat-loop#stopping-tools]]. |
 | `BASH_TOOL_SENTINEL_ID` | The id that the coding agent gives its in-memory `BashTool`. See [[code-execution#bash-tool-sentinel]]. |
 | Message types | `ChatMessage` (the row), `ChatResponseItem` (the saved steps of a response), `llm/models.py:Message` (the conversation type the runtime uses) and `llm/model_request.py:ChatCompletionMessage` (the provider wire form). See [[core-chat-loop#three-message-types]]. |
 | Active branch | The chain of `latest_child_message_id` pointers from a session's root message. See [[chat-persistence]]. |

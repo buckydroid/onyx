@@ -197,6 +197,13 @@ describe("usePacketProcessor", () => {
       expect(result.current.isComplete).toBe(false);
     });
 
+    it("completes when stopped with no answer to render", () => {
+      const { result } = renderHook(() =>
+        usePacketProcessor([searchStart(0), stopAt()], 1),
+      );
+      expect(result.current.isComplete).toBe(true);
+    });
+
     it("stays incomplete when stop has not been seen", () => {
       const { result } = renderHook(() =>
         usePacketProcessor([messageStart(0)], 1),
@@ -272,17 +279,17 @@ describe("usePacketProcessor", () => {
       expect(result.current.isComplete).toBe(true);
     });
 
-    it("image generation flow", () => {
+    it("image generation is a timeline step that collects its images", () => {
       const { result } = renderHook(() =>
         usePacketProcessor(
           [imageStart(0), imageFinal(0), sectionEnd(0), stopAt()],
           1,
         ),
       );
-      expect(result.current.isGeneratingImage).toBe(true);
-      expect(result.current.generatedImageCount).toBe(1);
-      expect(result.current.finalAnswerComing).toBe(true);
-      expect(result.current.displayGroups.length).toBe(1);
+      expect(result.current.generatedImages.length).toBe(1);
+      expect(result.current.finalAnswerComing).toBe(false);
+      expect(result.current.toolTurnGroups.length).toBe(1);
+      expect(result.current.displayGroups.length).toBe(0);
     });
   });
 });

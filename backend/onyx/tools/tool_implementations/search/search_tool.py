@@ -125,6 +125,8 @@ from onyx.tools.interface import (
 )
 from onyx.tools.models import (
     ChatMinimalTextMessage,
+    CodeModeExposure,
+    CodeModeResultSpec,
     ToolCallException,
     ToolContext,
 )
@@ -154,6 +156,7 @@ from onyx.tools.tool_implementations.search.search_utils import (
     weighted_reciprocal_rank_fusion,
 )
 from onyx.tools.tool_implementations.utils import (
+    SEARCH_RESULTS_CODE_MODE_RESULT,
     convert_inference_sections_to_llm_string,
 )
 from onyx.utils.logger import setup_logger
@@ -689,6 +692,10 @@ class SearchTool(Tool):
         return self._id
 
     @property
+    def code_mode_exposure(self) -> CodeModeExposure:
+        return CodeModeExposure.IMMEDIATE
+
+    @property
     def name(self) -> str:
         return self.NAME
 
@@ -699,6 +706,10 @@ class SearchTool(Tool):
     @property
     def display_name(self) -> str:
         return self.DISPLAY_NAME
+
+    @property
+    def code_mode_result(self) -> CodeModeResultSpec:
+        return SEARCH_RESULTS_CODE_MODE_RESULT
 
     """For explicit tool calling"""
 

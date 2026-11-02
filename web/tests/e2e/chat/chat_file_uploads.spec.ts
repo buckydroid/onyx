@@ -6,6 +6,7 @@ import { CHECKERED_PNG } from "@tests/e2e/fixtures/images";
 import { loginAsWorkerUser } from "@tests/e2e/utils/auth";
 import { sendMessage } from "@tests/e2e/utils/chatActions";
 import {
+  buildMockCodeModeImageStream,
   buildMockImageGenStream,
   buildMockStream,
   mockChatEndpoint,
@@ -90,6 +91,16 @@ async function uploadFilesToChat(
       : inputWrapper.getByText(file.name);
     await expect(card.first()).toBeVisible({ timeout: 10000 });
   }
+}
+
+async function serveImage(page: Page, fileId: string): Promise<void> {
+  await page.route(`**/api/chat/file/${fileId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "image/png",
+      body: CHECKERED_PNG,
+    });
+  });
 }
 
 test.describe("Chat File Uploads", () => {
@@ -230,14 +241,7 @@ test.describe("Chat File Uploads", () => {
       await chat.goto();
 
       const fileId = "00000000-0000-0000-0000-00000000aaaa";
-
-      await page.route(`**/api/chat/file/${fileId}`, async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "image/png",
-          body: CHECKERED_PNG,
-        });
-      });
+      await serveImage(page, fileId);
 
       await mockChatEndpoint(
         page,
@@ -253,8 +257,8 @@ test.describe("Chat File Uploads", () => {
         "Generate an image of a friendly cartoon onyx stone"
       );
 
-      const aiMessage = page.getByTestId("onyx-ai-message").first();
-      const generatedImage = aiMessage.locator('img[alt="Chat attachment"]');
+      const aiMessage = chat.aiMessage();
+      const generatedImage = chat.generatedImages();
       await expect(generatedImage).toBeVisible({ timeout: 10000 });
       await expect(generatedImage).toHaveAttribute(
         "src",
@@ -263,6 +267,63 @@ test.describe("Chat File Uploads", () => {
       await expect(aiMessage).toContainText(IMAGE_GEN_AI_MESSAGE);
 
       await chat.screenshotContainer("chat-llm-generated-image");
+    });
+
+    test("an image from an earlier step leads the answer once", async ({
+      page,
+    }) => {
+      await chat.goto();
+      const fileId = "00000000-0000-0000-0000-00000000bbbb";
+      await serveImage(page, fileId);
+      await mockChatEndpoint(
+        page,
+        buildMockImageGenStream({
+          fileId,
+          revisedPrompt: "An onyx stone on a desk",
+          message: IMAGE_GEN_AI_MESSAGE,
+          searchAfterImage: true,
+        })
+      );
+
+      await sendMessage(page, "Draw an onyx stone, then search for onyx");
+
+      const aiMessage = chat.aiMessage();
+      const images = chat.generatedImages();
+      await expect(images).toHaveCount(1, { timeout: 10000 });
+      await expect(images.first()).toBeVisible();
+      const answerText = aiMessage.getByText(IMAGE_GEN_AI_MESSAGE);
+      await expect(answerText).toBeVisible();
+
+      const imageBox = await images.first().boundingBox();
+      const textBox = await answerText.boundingBox();
+      expect(imageBox && textBox && imageBox.y < textBox.y).toBeTruthy();
+    });
+
+    test("an image from a code mode program shows in the answer", async ({
+      page,
+    }) => {
+      await chat.goto();
+      const fileId = "00000000-0000-0000-0000-00000000cccc";
+      await serveImage(page, fileId);
+      await mockChatEndpoint(
+        page,
+        buildMockCodeModeImageStream({
+          fileId,
+          revisedPrompt: "An onyx stone in the sun",
+          message: IMAGE_GEN_AI_MESSAGE,
+        })
+      );
+
+      await sendMessage(page, "Write code that draws an onyx stone");
+
+      const aiMessage = chat.aiMessage();
+      const images = chat.generatedImages();
+      await expect(images).toHaveCount(1, { timeout: 10000 });
+      await expect(images.first()).toHaveAttribute(
+        "src",
+        new RegExp(`/api/chat/file/${fileId}`)
+      );
+      await expect(aiMessage).toContainText(IMAGE_GEN_AI_MESSAGE);
     });
   });
 

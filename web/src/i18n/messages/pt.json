@@ -12638,6 +12638,9 @@
       "agentMessage": {
         "stoppedGeneration": {
           "text": "O usuário interrompeu a geração"
+        },
+        "timedOut": {
+          "text": "A resposta parou porque atingiu o limite de tempo."
         }
       },
       "codeBlock": {
@@ -12773,23 +12776,17 @@
         }
       },
       "imageTool": {
-        "defaultStatus": {
-          "text": "Geração de imagens"
-        },
-        "emptyState": {
-          "text": "Nenhuma imagem gerada"
-        },
         "failedStatus": {
           "text": "Falha na geração de imagens"
         },
         "generatedStatus": {
           "text": "{count, plural, one {# imagem gerada} other {# imagens geradas}}"
         },
-        "generatingImagesStatus": {
-          "text": "Gerando imagens..."
-        },
         "generatingStatus": {
           "text": "Gerando imagem..."
+        },
+        "stoppedStatus": {
+          "text": "Geração de imagens interrompida"
         }
       },
       "memoizedLink": {
@@ -12951,9 +12948,6 @@
           "executingTool": {
             "label": "Executando ferramenta"
           },
-          "generatingImage": {
-            "label": "Gerando imagem..."
-          },
           "generatingImages": {
             "label": "Gerando imagens"
           },
@@ -12980,6 +12974,9 @@
           },
           "updatingMemory": {
             "label": "Atualizando memória..."
+          },
+          "working": {
+            "label": "Trabalhando"
           }
         },
         "internalSearch": {

@@ -9,6 +9,8 @@ import {
   PacketType,
   StopReason,
 } from "@/chat/streamingModels";
+import { isNestedPacket } from "@/chat/timeline/packetHelpers";
+import { isDisplayPacket, isToolPacket } from "@/chat/timeline/packetUtils";
 import { TurnGroup } from "@/chat/timeline/transformers";
 
 export interface TimelineHeaderResult {
@@ -20,14 +22,14 @@ export interface TimelineHeaderResult {
 export function useTimelineHeader(
   turnGroups: TurnGroup[],
   stopReason?: StopReason,
-  isGeneratingImage?: boolean,
+  codeModeWorking = false,
 ): TimelineHeaderResult {
   return useMemo(() => {
     const hasPackets = turnGroups.length > 0;
     const userStopped = stopReason === StopReason.USER_CANCELLED;
 
-    if (isGeneratingImage && !hasPackets) {
-      return { headerText: "Generating image...", hasPackets, userStopped };
+    if (codeModeWorking) {
+      return { headerText: "Working", hasPackets, userStopped };
     }
 
     if (!hasPackets) {
@@ -44,7 +46,12 @@ export function useTimelineHeader(
       return { headerText: "Thinking...", hasPackets, userStopped };
     }
 
-    const firstPacket = currentStep.packets[0];
+    // The step's own first packet decides the header; nested calls do not.
+    const firstPacket = currentStep.packets.find(
+      (packet) =>
+        !isNestedPacket(packet) &&
+        (isToolPacket(packet, false) || isDisplayPacket(packet)),
+    );
     if (!firstPacket) {
       return { headerText: "Thinking...", hasPackets, userStopped };
     }
@@ -101,5 +108,5 @@ export function useTimelineHeader(
     }
 
     return { headerText: "Thinking...", hasPackets, userStopped };
-  }, [turnGroups, stopReason, isGeneratingImage]);
+  }, [turnGroups, stopReason, codeModeWorking]);
 }

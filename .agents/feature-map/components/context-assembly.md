@@ -105,8 +105,12 @@ document and text) with a pointer to that result
 (`chat/prompt_utils.py:_deduplicate_search_passages`), so a change to the
 search result JSON must keep that parse working. On a later turn, saved tool results carry
 `omit_tool_result_content` (`chat/chat_utils.py:omit_prior_tool_result_content`),
-and `prepare_prompt` sends `TOOL_CALL_RESPONSE_CROSS_MESSAGE` in their place.
-Image generation results stay visible. `backend/onyx/chat/README.md` has worked
+and `prepare_prompt` sends `chat/tool_results.py:omitted_result_text` in their
+place: `TOOL_CALL_RESPONSE_CROSS_MESSAGE`, plus the `file_id` and revised prompt
+of each generated image, also of images made inside a code mode program, so a
+later message can edit them. For a program that did not complete, it also keeps
+the list of the program's calls with their states, because those calls may have
+had effects. `backend/onyx/chat/README.md` has worked
 examples of how the agent prompt and project files move from turn to turn.
 
 **System prompt.** `chat/prompt_utils.py:build_system_prompt` resolves the
@@ -133,15 +137,17 @@ system message, and the custom agent prompt holds only project instructions. If
 the default base prompt is empty, the custom agent prompt becomes the system
 message and stops moving (`build_chat_prompt`).
 
-**Reminder.** `chat/prompt_utils.py:build_chat_reminder` starts from the image
-generation reminder, the open-URL nudge (after a web search in the previous step
-that found results, when the agent has the open-URL tool and steps remain) or
-the persona task prompt. Only one of the three is used, so the task prompt is
-left out of a step that gets the image or open-URL reminder.
+**Reminder.** `chat/prompt_utils.py:build_chat_reminder` starts from the
+open-URL nudge (after a web search in the previous step that found results,
+when the agent has the open-URL tool and steps remain) or the persona task
+prompt. Only one of the two is used, so the task prompt is left out of a step
+that gets the open-URL reminder.
 `chat/prompt_utils.py:build_reminder_message` then adds the last-step reminder,
 the citation guidance once a citeable tool has run in this turn or the turn has
-project files (inline or searched), and the file reminder after the Python tool
-makes a file. `chat/prompt_formatting.py:prepare_model_messages` wraps it in
+project files (inline or searched), the file reminder after the Python tool
+makes a file, and the image reminder once an image call in this turn made
+images. These checks also read the nested calls of a code mode result.
+`chat/prompt_formatting.py:prepare_model_messages` wraps it in
 `<system-reminder>` tags.
 
 **Budget.** In setup, `calculate_reserved_tokens` reserves a worst-case system

@@ -12638,6 +12638,9 @@
       "agentMessage": {
         "stoppedGeneration": {
           "text": "أوقف المستخدم التوليد"
+        },
+        "timedOut": {
+          "text": "توقف الرد لأنه بلغ الحد الزمني."
         }
       },
       "codeBlock": {
@@ -12773,23 +12776,17 @@
         }
       },
       "imageTool": {
-        "defaultStatus": {
-          "text": "توليد الصور"
-        },
-        "emptyState": {
-          "text": "لم يتم توليد صور"
-        },
         "failedStatus": {
           "text": "فشل توليد الصورة"
         },
         "generatedStatus": {
           "text": "{count, plural, one {تم توليد صورة واحدة} other {تم توليد # صور}}"
         },
-        "generatingImagesStatus": {
-          "text": "جارٍ توليد الصور..."
-        },
         "generatingStatus": {
           "text": "جارٍ توليد الصورة..."
+        },
+        "stoppedStatus": {
+          "text": "تم إيقاف توليد الصورة"
         }
       },
       "memoizedLink": {
@@ -12951,9 +12948,6 @@
           "executingTool": {
             "label": "جارٍ تنفيذ الأداة"
           },
-          "generatingImage": {
-            "label": "جارٍ توليد الصورة..."
-          },
           "generatingImages": {
             "label": "جارٍ توليد الصور"
           },
@@ -12980,6 +12974,9 @@
           },
           "updatingMemory": {
             "label": "جارٍ تحديث الذاكرة..."
+          },
+          "working": {
+            "label": "جارٍ العمل"
           }
         },
         "internalSearch": {

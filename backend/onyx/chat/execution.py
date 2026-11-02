@@ -2,13 +2,21 @@
 
 import threading
 import time
+from collections.abc import Sequence
 from concurrent.futures import Future
 from contextlib import ExitStack
+from datetime import datetime, timedelta, timezone
 from functools import partial
 
 from onyx.agents.agent_coordination import AgentCoordinator
 from onyx.agents.concurrency import WorkTracker
-from onyx.agents.models import AgentInfo, RunState
+from onyx.agents.models import (
+    AgentInfo,
+    RunFailure,
+    RunFailureKind,
+    RunState,
+    RunStatus,
+)
 from onyx.agents.runtime import Run
 from onyx.cache.factory import get_cache_backend
 from onyx.cache.interface import CacheLockLostError
@@ -23,7 +31,7 @@ from onyx.chat.incognito import incognito_llm_request_policy
 from onyx.chat.incognito_context import incognito_session_ended
 from onyx.chat.models import ChatResponseOutcome, ChatTurnSetup, CreateChatSessionID
 from onyx.chat.persistence import ChatResponsePersistence
-from onyx.chat.presentation import ResponsePresenter
+from onyx.chat.presentation import ResponsePresenter, overall_stop
 from onyx.chat.prompt_utils import build_language_section
 from onyx.chat.restoration import restore_chat_agent
 from onyx.chat.run_store import ChatRunStore
@@ -32,6 +40,7 @@ from onyx.chat.stream_buffer import ChatDelivery, ChatStream, StreamBufferWriter
 from onyx.chat.subagents import ChatAgentDirectory
 from onyx.configs.chat_configs import (
     CHAT_EXECUTION_TIMEOUT_S,
+    CODE_MODE_ENABLED,
     SKIP_DEEP_RESEARCH_CLARIFICATION,
 )
 from onyx.configs.constants import DEFAULT_PERSONA_ID, DocumentSource
@@ -56,6 +65,7 @@ from onyx.server.query_and_chat.streaming_models import (
     StreamingError,
 )
 from onyx.server.settings.store import load_settings
+from onyx.tools.interface import Tool
 from onyx.tools.tool_constructor import (
     CustomToolConfig,
     FileReaderToolConfig,
@@ -74,6 +84,9 @@ from shared_configs.contextvars import (
 
 logger = setup_logger()
 _CANCEL_POLL_INTERVAL_S = 0.25
+# Each response run ends itself at the turn deadline. The turn cancels later only
+# when work outlives that, e.g. preparation that never started a run.
+_DEADLINE_BACKSTOP = timedelta(seconds=30)
 # Count work across tenants without retaining their turns or request data.
 chat_turn_work = WorkTracker()
 
@@ -198,7 +211,13 @@ class ChatTurnExecution:
         )
         self._auto_filters = False
         self._stopped_by_user = False
+        # Whether a stop packet reached the client; the turn then sends none of its own.
+        self._stop_delivered = False
         self._last_refresh = self._last_stop_check = time.monotonic()
+        # Each response run cancels itself at this time and records a DEADLINE failure.
+        self._deadline_at = datetime.now(timezone.utc) + timedelta(
+            seconds=CHAT_EXECUTION_TIMEOUT_S
+        )
 
     def reject(self, error: BaseException) -> None:
         if self._query_observation is not None:
@@ -233,6 +252,7 @@ class ChatTurnExecution:
     def _publish(self, packet: Packet) -> None:
         if not self.cancellation.cancelled:
             self.delivery.publish(packet)
+            self._stop_delivered |= isinstance(packet.obj, OverallStop)
 
     def run(self, *, startup_error: BaseException | None = None) -> None:
         try:
@@ -288,8 +308,6 @@ class ChatTurnExecution:
             self._response_workers[worker] = persistence
             worker.add_done_callback(lambda _future: self._completion_changed.set())
 
-        deadline = time.monotonic() + CHAT_EXECUTION_TIMEOUT_S
-        timed_out = False
         while True:
             # Clear before checking state so a concurrent completion cannot be lost.
             self._completion_changed.clear()
@@ -303,22 +321,16 @@ class ChatTurnExecution:
             except Exception:
                 self.cancellation.cancel()
                 logger.exception("Chat response polling failed; draining active work")
-            if not timed_out and time.monotonic() >= deadline:
-                timed_out = True
-                logger.error("Chat turn exceeded its execution deadline")
-                self.cancellation.cancel()
             with self._lock:
                 stores = tuple(self._stores)
             if not self._response_workers and not any(
                 store.has_owned_work for store in stores
             ):
                 if not self.delivery.is_closing:
-                    if self._stopped_by_user:
+                    stop = self._turn_stop()
+                    if stop is not None:
                         self.delivery.publish(
-                            Packet(
-                                placement=Placement(turn_index=0),
-                                obj=OverallStop(stop_reason="user_cancelled"),
-                            )
+                            Packet(placement=Placement(turn_index=0), obj=stop)
                         )
                     self.delivery.finish()
                 if self.delivery.finished.done() and self._clear_processing_status():
@@ -395,9 +407,9 @@ class ChatTurnExecution:
             chat_agent = create_chat_agent(
                 self.setup, self.user, index, cancellation, self._auto_filters
             )
-            persistence.tool_ids = {
-                tool.name: tool.id for tool in chat_agent.application_tools
-            }
+            persistence.tool_ids = tool_row_ids(chat_agent.application_tools)
+            # Restored and child agents build their own tools from these.
+            configured_tools = chat_agent.configured_tools
             if isinstance(chat_agent, DeepResearchAgent):
                 if self.setup.research_tool_id is None:
                     raise ValueError("Deep research tool configuration is missing")
@@ -438,7 +450,7 @@ class ChatTurnExecution:
             directory = ChatAgentDirectory(
                 history_store=history_store,
                 llm=persistence.llm,
-                tools=chat_agent.application_tools,
+                tools=configured_tools,
                 user_identity=self.setup.user_identity,
                 store=store,
             )
@@ -448,7 +460,7 @@ class ChatTurnExecution:
                     build_agent=partial(
                         restore_chat_agent,
                         llm=persistence.llm,
-                        tools=chat_agent.application_tools,
+                        tools=configured_tools,
                         user_identity=self.setup.user_identity,
                     ),
                     directory=directory,
@@ -487,13 +499,12 @@ class ChatTurnExecution:
                     messages=self.setup.input_messages,
                     max_steps=chat_agent.max_steps,
                     cancellation=cancellation,
+                    deadline_at=self._deadline_at,
                     coordinator=coordinator,
                     event_dispatcher=self.delivery.events,
                     on_event=ResponsePresenter(
                         emitter,
-                        tool_ids={
-                            tool.name: tool.id for tool in chat_agent.application_tools
-                        },
+                        tool_ids=tool_row_ids(chat_agent.application_tools),
                     ).consume,
                 )
 
@@ -524,6 +535,22 @@ class ChatTurnExecution:
         finally:
             CURRENT_QUERY_OBSERVATION.reset(observation_token)
 
+    def _turn_stop(self) -> OverallStop | None:
+        """The stop packet the turn sends when it, not a response run, ended the work."""
+        if self._stop_delivered:
+            return None
+        if self.cancellation.reason == "deadline":
+            return overall_stop(
+                RunStatus.CANCELLED,
+                RunFailure(
+                    kind=RunFailureKind.DEADLINE,
+                    message="The chat turn reached its time limit.",
+                ),
+            )
+        if self._stopped_by_user:
+            return overall_stop(RunStatus.CANCELLED, None)
+        return None
+
     def _poll_control(self) -> None:
         with self._lock:
             stores = tuple(self._stores)
@@ -533,6 +560,13 @@ class ChatTurnExecution:
             except Exception:
                 self.cancellation.cancel()
                 logger.exception("Chat ownership control failed; will retry")
+
+        if (
+            not self.cancellation.cancelled
+            and datetime.now(timezone.utc) >= self._deadline_at + _DEADLINE_BACKSTOP
+        ):
+            logger.warning("Chat turn passed its deadline; cancelling remaining work")
+            self.cancellation.cancel("deadline")
 
         now = time.monotonic()
         if (
@@ -561,6 +595,11 @@ class ChatTurnExecution:
                 )
             except Exception:
                 logger.exception("Failed to refresh chat processing status; will retry")
+
+
+def tool_row_ids(tools: Sequence[Tool]) -> dict[str, int | None]:
+    """Map each tool name to the tool row that saved calls reference."""
+    return {tool.name: tool.id for tool in tools}
 
 
 def create_chat_agent(
@@ -658,6 +697,7 @@ def create_chat_agent(
             agent_id=agent_id,
             messages=list(setup.messages),
             tools=tools,
+            code_mode=CODE_MODE_ENABLED,
             custom_agent_prompt=setup.custom_agent_prompt,
             context_files=setup.extracted_context_files,
             persona=setup.persona,

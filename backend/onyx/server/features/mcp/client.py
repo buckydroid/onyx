@@ -5,7 +5,10 @@ This module provides a proper MCP client that follows the JSON-RPC 2.0 specifica
 and handles connection initialization, session management, and protocol communication.
 """
 
+import asyncio
+import json
 from collections.abc import Callable, Coroutine
+from contextlib import suppress
 from enum import Enum
 from typing import Any, Dict, TypeVar
 
@@ -16,18 +19,21 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamablehttp_client
 from mcp.shared._httpx_utils import McpHttpClientFactory
 from mcp.types import (
+    AudioContent,
     CallToolResult,
+    ImageContent,
     InitializeResult,
     ListResourcesResult,
     TextResourceContents,
 )
 from mcp.types import Tool as MCPLibTool
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from onyx.configs.app_configs import MCP_TOOL_CALL_TIMEOUT_SECONDS
 from onyx.db.enums import MCPTransport
 from onyx.error_handling.error_codes import OnyxErrorCode
 from onyx.error_handling.exceptions import OnyxError
+from onyx.llm.cancellation import AgentCancelled, CancellationSignal
 from onyx.server.features.mcp.ssrf import mcp_ssrf_httpx_client_factory
 from onyx.utils.logger import setup_logger
 from onyx.utils.threadpool_concurrency import run_async_sync_no_cancel
@@ -172,19 +178,58 @@ def log_exception_group(e: ExceptionGroup) -> Exception | None:
     return saved_e
 
 
+class _Cancelled:
+    """The result of a call that its cancellation signal stopped."""
+
+
+def _run_until_cancelled(
+    coro: Coroutine[Any, Any, T], cancellation: CancellationSignal | None
+) -> T:
+    """Run `coro` to completion on its own event loop; raise AgentCancelled, and
+    cancel the coroutine, when `cancellation` fires first."""
+    if cancellation is None:
+        return run_async_sync_no_cancel(coro)
+    signal = cancellation
+
+    async def until_cancelled() -> T | _Cancelled:
+        loop = asyncio.get_running_loop()
+        stopped = asyncio.Event()
+        work = asyncio.ensure_future(coro)
+
+        def stop_soon() -> None:
+            loop.call_soon_threadsafe(stopped.set)
+
+        with signal.on_cancel(stop_soon):
+            stop = asyncio.ensure_future(stopped.wait())
+            await asyncio.wait({work, stop}, return_when=asyncio.FIRST_COMPLETED)
+            stop.cancel()
+        if work.done():
+            return work.result()
+        work.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await work
+        return _Cancelled()
+
+    result = run_async_sync_no_cancel(until_cancelled())
+    if isinstance(result, _Cancelled):
+        raise AgentCancelled()
+    return result
+
+
 def _call_mcp_client_function_sync(
     function: Callable[[ClientSession], Coroutine[Any, Any, T]],
     server_url: str,
     connection_headers: dict[str, str] | None = None,
     transport: MCPTransport = MCPTransport.STREAMABLE_HTTP,
     auth: OAuthClientProvider | None = None,
+    cancellation: CancellationSignal | None = None,
     **kwargs: Any,
 ) -> T:
     run_client_function = _create_mcp_client_function_runner(
         function, server_url, connection_headers, transport, auth, **kwargs
     )
     try:
-        return run_async_sync_no_cancel(run_client_function())
+        return _run_until_cancelled(run_client_function(), cancellation)
     except Exception as e:
         logger.error("Failed to call MCP client function: %s", e)
         if isinstance(e, ExceptionGroup):
@@ -219,7 +264,6 @@ async def call_mcp_client_function_async(
 
 def process_mcp_result(call_tool_result: CallToolResult) -> str:
     """Flatten MCP CallToolResult->text (prefers text content blocks)."""
-    # TODO: use structured_content if available
     parts = []
     for content_block in call_tool_result.content:
         if content_block.type == ContentBlockTypes.TEXT.value:
@@ -235,16 +279,43 @@ def process_mcp_result(call_tool_result: CallToolResult) -> str:
             parts.append(
                 f"link: {content_block.uri} title: {content_block.title} description: {content_block.description}"
             )
-        # TODO: handle other content block types
+        if isinstance(content_block, ImageContent | AudioContent):
+            # Tool results carry text only.
+            parts.append(f"[{content_block.type} omitted: {content_block.mimeType}]")
 
-    return "\n\n".join(p for p in parts if p) or str(call_tool_result.structuredContent)
+    text = "\n\n".join(p for p in parts if p)
+    if text or call_tool_result.structuredContent is None:
+        return text
+    return json.dumps(call_tool_result.structuredContent)
 
 
-def _call_mcp_tool(tool_name: str, arguments: dict[str, Any]) -> MCPClientFunction[str]:
-    async def call_tool(session: ClientSession) -> str:
+def _reject_non_finite_number(constant: str) -> float:
+    raise ValueError(f"Non-finite JSON number: {constant}")
+
+
+def _text_value(text: str) -> JsonValue:
+    """`text`, parsed when it is a JSON object or array, so the result is
+    JSON-encoded once rather than as an escaped string inside JSON. Any other
+    text, including a JSON scalar, stays a string."""
+    try:
+        parsed = json.loads(text, parse_constant=_reject_non_finite_number)
+    except (ValueError, RecursionError):
+        return text
+    return parsed if isinstance(parsed, dict | list) else text
+
+
+def mcp_result_value(call_tool_result: CallToolResult) -> JsonValue:
+    """The value the model reads for a tool result: its text content
+    (`process_mcp_result`), parsed when it is a JSON object or array."""
+    return _text_value(process_mcp_result(call_tool_result))
+
+
+def _call_mcp_tool(
+    tool_name: str, arguments: dict[str, Any]
+) -> MCPClientFunction[CallToolResult]:
+    async def call_tool(session: ClientSession) -> CallToolResult:
         await session.initialize()
-        result = await session.call_tool(tool_name, arguments)
-        return process_mcp_result(result)
+        return await session.call_tool(tool_name, arguments)
 
     return call_tool
 
@@ -256,14 +327,18 @@ def call_mcp_tool(
     connection_headers: dict[str, str] | None = None,
     transport: MCPTransport = MCPTransport.STREAMABLE_HTTP,
     auth: OAuthClientProvider | None = None,
-) -> str:
-    """Call a specific tool on the MCP server"""
+    cancellation: CancellationSignal | None = None,
+) -> CallToolResult:
+    """Call a specific tool on the MCP server. A tool failure that the server
+    reports arrives as a result with `isError` set. When `cancellation` fires,
+    the call stops and raises AgentCancelled."""
     return _call_mcp_client_function_sync(
         _call_mcp_tool(tool_name, arguments),
         server_url,
         connection_headers,
         transport,
         auth,
+        cancellation,
     )
 
 

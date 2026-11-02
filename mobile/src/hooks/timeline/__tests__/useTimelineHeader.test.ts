@@ -24,9 +24,34 @@ describe("useTimelineHeader — text map", () => {
     expect(result.current.hasPackets).toBe(false);
   });
 
-  it("shows the image header when generating with no tool packets", () => {
-    const { result } = renderHook(() => useTimelineHeader([], undefined, true));
-    expect(result.current.headerText).toBe("Generating image...");
+  it("shows Working while work without a step runs", () => {
+    const turn: TurnGroup = makeTurn(0, [
+      makeStep(0, 0, [
+        makePacket(
+          PacketType.SEARCH_TOOL_START,
+          { turn_index: 0 },
+          { is_internet_search: false },
+        ),
+      ]),
+    ]);
+    const { result } = renderHook(() =>
+      useTimelineHeader([turn], undefined, true),
+    );
+    expect(result.current.headerText).toBe("Working");
+  });
+
+  it("reads the header from the step's own packet, not a nested call", () => {
+    const turn: TurnGroup = makeTurn(0, [
+      makeStep(0, 0, [
+        makePacket(PacketType.FETCH_TOOL_START, {
+          turn_index: 0,
+          sub_turn_index: 0,
+        }),
+        makePacket(PacketType.RESEARCH_AGENT_START, { turn_index: 0 }),
+      ]),
+    ]);
+    const { result } = renderHook(() => useTimelineHeader([turn]));
+    expect(result.current.headerText).toBe("Researching");
   });
 
   it("maps each activity packet type to its label", () => {

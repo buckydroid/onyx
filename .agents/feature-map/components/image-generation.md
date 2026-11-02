@@ -16,8 +16,9 @@ is on (`ee/onyx/server/tenants/provisioning.py`).
 - **An end user** asks for an image in chat. A progress indicator shows, then
   the image appears in the answer. The user can ask for changes to an image
   they attached or to one that the assistant made, and the model uses it as a
-  reference. After an image call, the assistant answers without calling more
-  tools in that turn.
+  reference. The images show above the answer text. The turn goes on after an
+  image call, so the assistant can call more tools. With code mode on, a
+  program can generate images too, and they show the same way.
 - **An admin** opens the image generation admin page. It lists the image
   models of each connected LLM provider. The recommended view, the default,
   shows the non-deprecated catalog image models; the full view shows every
@@ -49,7 +50,7 @@ It does not own:
   `LLMProvider` row, which [[llm-providers]] owns.
 - File storage and the session stamp on generated images
   ([[file-store-and-user-files]]).
-- The chat cycle that ends tool calls after an image ([[core-chat-loop]]).
+- How the timeline and the answer show the images ([[chat-frontend]]).
 - The Craft `image-generation` skill, which calls the CLI ([[skills]]). The
   skill is offered only when `is_image_generation_configured` is true.
 
@@ -132,16 +133,15 @@ and saves no files. The caller needs `Permission.GENERATE_IMAGE`.
    `image_gen/generation.py:is_image_generation_configured` calls `validate_credentials`, which checks
    only that the fields are present. It does not call the provider. A wrong key
    shows the tool and fails at run time.
-3. `image-ends-tool-phase` **Image generation ends the tool phase.**
-   [[core-chat-loop]] owns the stopping-tool rule.
-   `chat/agent.py:ChatAgent._update_tool_context` sets `ran_image_gen` when a
-   step calls `generate_image`, even if the call fails. Other calls in that step
-   still run. Then `chat/agent.py:ChatAgent._prepare_step` offers no tools for
-   the rest of the turn, so the model cannot retry. The flag resets at the next
-   turn and is saved in `ChatFeatureState`. When reminders are on,
-   `chat/prompt_utils.py:build_chat_reminder` uses
-   `prompts/chat_prompts.py:IMAGE_GEN_REMINDER`. Any tool added to
-   `tools/built_in_tools.py:STOPPING_TOOLS_NAMES` gets the same rule and reminder.
+3. `image-turn-continues` **An image call does not end the turn.** The tool is
+   an ordinary step, and code mode programs can call it
+   ([[code-execution#code-mode-nested-calls-are-real-calls]]). When reminders
+   are on, `chat/prompt_utils.py:build_reminder_message` adds
+   `prompts/chat_prompts.py:IMAGE_GEN_REMINDER` once an image call in the turn
+   made images, nested calls included: the user already sees the images,
+   so the model must not link or embed them. A later turn reads each image's
+   `file_id` and revised prompt in place of the omitted result
+   (`chat/tool_results.py:omitted_result_text`), so the user can ask for edits.
 4. `response-format-per-model` **`response_format` depends on the model.**
    `image_gen/generation.py:response_format_for_model` leaves it out for
    `gpt-image-*` models, which reject it, and asks for `b64_json` for the rest.
@@ -174,7 +174,8 @@ and saves no files. The caller needs `Permission.GENERATE_IMAGE`.
    names.** The web enum calls the finished-image packet
    `IMAGE_GENERATION_TOOL_DELTA`, but its value is `"image_generation_final"`
    (`web/src/app/app/services/streamingModels.ts`). The renderer treats "start
-   with no end" as running. Match packets by their string value.
+   with no end" as running, and a call that ends or stops with no image and no
+   error as stopped. Match packets by their string value.
 9. `one-image-per-chat-call` **The chat tool makes one image per call.**
    `ImageGenerationTool._generate_image` passes `n=1`. Only the standalone
    endpoint accepts `n`, up to `server/features/image_generation/api.py:_MAX_IMAGES`.
@@ -249,6 +250,7 @@ and saves no files. The caller needs `Permission.GENERATE_IMAGE`.
 - External dependency unit tests: `backend/tests/external_dependency_unit/tools/`.
 - Integration: `backend/tests/integration/tests/image_generation/` and
   `backend/tests/integration/tests/tools/`.
-- Playwright: `web/tests/e2e/admin/image-generation/`.
+- Playwright: `web/tests/e2e/admin/image-generation/`, and the generated-image
+  cases in `web/tests/e2e/chat/chat_file_uploads.spec.ts`.
 - By hand, set a default config and ask for an image. Then remove the default:
   the next message must have no image tool call and no error.

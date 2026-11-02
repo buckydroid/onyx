@@ -14,8 +14,8 @@
 
 - **An end user** sends a message. The assistant can think, run tools (search,
   web, code, images, custom tools) for several steps, and then streams an answer
-  with citations. On the last allowed step (`MAX_LLM_CYCLES`, default 6) the
-  model must answer without tools.
+  with citations. On the last allowed step (`MAX_LLM_CYCLES`, default 100, a
+  safety cap) the model must answer without tools.
 - **One message at a time.** While a turn runs, the session is busy. The client
   waits until the session is idle before it sends again. The backend refuses a
   second streaming send on the same session with a `StreamingError` packet whose
@@ -157,8 +157,12 @@ cancel the turn. A normal end sends one `OverallStop(finished)` per model from
 **Control.** `ChatTurnExecution.run` wakes on worker, save, idle and delivery
 events, and at least every 250 ms. It checks Stop on each wake while the turn is
 not cancelled, refreshes the admission lease every 5 s, and lets each
-`ChatRunStore` renew its owner leases every 10 s. After
-`CHAT_EXECUTION_TIMEOUT_S` it cancels the turn. When no response worker and no
+`ChatRunStore` renew its owner leases every 10 s. Each response run gets the
+turn's deadline (`CHAT_EXECUTION_TIMEOUT_S` after the turn starts) as its
+`deadline_at`, and the run's own timer cancels it there. The turn's signal is
+cancelled only by a backstop: `_poll_control` cancels it with reason `deadline`
+when work remains `_DEADLINE_BACKSTOP` (30 s) past the deadline, for example
+preparation that never started a run. When no response worker and no
 owned run remains, it finishes delivery and then releases the admission. A child
 run's owner lease also keeps the turn and its admission alive. API shutdown
 waits up to `CHAT_EXECUTION_TIMEOUT_S` for `chat/execution.py:chat_turn_work`,
@@ -200,7 +204,8 @@ termination grace period is much shorter, so it ends running turns first
    `chat/renderer.py:MessageRenderer` only read events and saved steps to make
    packets. Feature state that a later step needs lives on the agent, such as
    `ChatAgent.search_context` and its citation mapping, and is captured in
-   `ChatFeatureState` for restoration. All tools in one step read the same
+   `ChatFeatureState` for restoration. `ChatFeatureState.code_mode` keeps the
+   mode, so a restored run keeps its tool layout. All tools in one step read the same
    `ChatAgent._tool_context`; citation and search state advance only in
    `ChatAgent._after_step`, after every call in the step finishes.
 6. `persist-once-per-model` **One final outcome per model.** A new way to end a
@@ -215,8 +220,10 @@ termination grace period is much shorter, so it ends running turns first
    the session keeps content. Do not move reservation later.
 8. `disconnect-is-not-stop` **Disconnect is not stop.** A disconnect never
    cancels. The turn's `CancellationSignal` is cancelled by the user's stop key
-   (`chat/stop_signal_checker.py:request_stop`), the execution deadline, a lost
-   admission, a control or response-polling failure, or a failed worker.
+   (`chat/stop_signal_checker.py:request_stop`), a lost admission, a control or
+   response-polling failure, a failed worker, or the deadline backstop. The
+   execution deadline cancels each response run; the turn is cancelled only
+   when work remains `_DEADLINE_BACKSTOP` past the deadline.
    `ChatRunStore.poll_control` cancels one run when its owner lease is lost or
    its `chat_response_stop:<id>` key is set. Cancellation reaches every run,
    child and tool, and `ChatTurnExecution._publish` drops packets after it. It
@@ -227,14 +234,24 @@ termination grace period is much shorter, so it ends running turns first
    at request time. Replay shows `user_cancelled` from the saved
    `RunStatus.CANCELLED`; only legacy rows match the stop sentence by text
    ([[chat-persistence]]).
-9. `non-user-cancel` **Only a user Stop sends a final stop packet.** The control
-   thread publishes `OverallStop(stop_reason="user_cancelled")` after all work
-   drains only when the user's stop key cancelled the turn. The presenter's own
-   `OverallStop` is dropped after any cancel, and `AgentCancelled` publishes no
-   error. So a deadline, a lost admission or a control failure ends the live
-   stream with no stop packet and no error, but the saved row still ends with
-   "Generation was stopped by the user." and replays as `user_cancelled`. A new
-   cancellation cause must decide what the user sees.
+9. `non-user-cancel` **Only a user Stop or the deadline sends a final stop
+   packet.** The control thread publishes
+   `OverallStop(stop_reason="user_cancelled")` after all work drains when the
+   user's stop key cancelled the turn. The deadline first cancels only the runs,
+   so `ChatTurnExecution._publish` keeps delivering: each response sends its
+   closing records and its presenter's `OverallStop(stop_reason="timed_out")`
+   (`chat/presentation.py:overall_stop`, from the run's `DEADLINE` failure).
+   When the backstop cancels the turn, the control thread publishes
+   `ChatTurnExecution._turn_stop`, `OverallStop(stop_reason="timed_out")` from a
+   `DEADLINE` failure, after all work drains, unless a run's stop already reached
+   the client (`_stop_delivered`), so the stream gets exactly one stop packet.
+   The first cancellation reason wins, so a Stop before the deadline stays
+   `user_cancelled`.
+   After any other cancel, the presenter's packets are dropped, and
+   `AgentCancelled` publishes no error. So a lost admission or a control
+   failure ends the live stream with no stop packet and no error, but the
+   saved row still replays as `user_cancelled`. A new cancellation cause must
+   decide what the user sees.
 10. `stop-before-launch` **Stop does nothing before launch.** During setup the
     fence holds no stream ID, and launch clears any earlier stop key for the
     stream ID. A client must wait for the message-ID packet before it sends
@@ -277,10 +294,6 @@ termination grace period is much shorter, so it ends running turns first
     does stream resume. Code that assumes a real user breaks public agents.
     `stop_chat_session` does not allow anonymous users, so their Stop fails
     authentication (see Known issues).
-16. `stopping-tools` **Some tools end the tool phase.** After a tool in
-    `tools/built_in_tools.py:STOPPING_TOOLS_NAMES` (image generation) runs,
-    `chat/agent.py:ChatAgent._prepare_step` offers no tools for the rest of the
-    turn, the same as the last step.
 
 ---
 
@@ -364,9 +377,10 @@ termination grace period is much shorter, so it ends running turns first
   find "Chat turn control failed", "Chat response polling failed", "Chat response
   completion failed", "Chat session admission was lost", "Chat ownership control
   failed", "Response ownership renewal failed", "Failed to read agent Stop
-  request", "Response persistence exceeded its wait bound" and "Chat turn
-  exceeded its execution deadline". A deadline or a lost admission ends the
-  stream with no stop packet ([[#non-user-cancel]]). In the tenant's cache, the
+  request", "Response persistence exceeded its wait bound" and "was stopped at
+  its deadline" (`agents/runtime.py:Run._finish`). A deadline ends the stream with
+  `stop_reason="timed_out"`; a lost admission ends it with no stop packet
+  ([[#non-user-cancel]]). In the tenant's cache, the
   session owner key is `chatprocessing_owner_<session_id>`, the processing fence
   is `chatprocessing_fence_<session_id>` (it holds the stream ID), and the stop
   key is `chatsessionstop_fence_<session_id>_<stream_id>`. Each owned run also

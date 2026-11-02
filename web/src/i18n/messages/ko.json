@@ -12638,6 +12638,9 @@
       "agentMessage": {
         "stoppedGeneration": {
           "text": "사용자가 생성을 중지했습니다"
+        },
+        "timedOut": {
+          "text": "응답이 시간 제한에 도달하여 중지되었습니다."
         }
       },
       "codeBlock": {
@@ -12773,23 +12776,17 @@
         }
       },
       "imageTool": {
-        "defaultStatus": {
-          "text": "이미지 생성"
-        },
-        "emptyState": {
-          "text": "생성된 이미지 없음"
-        },
         "failedStatus": {
           "text": "이미지 생성 실패"
         },
         "generatedStatus": {
           "text": "{count, plural, one {이미지 #개 생성됨} other {이미지 #개 생성됨}}"
         },
-        "generatingImagesStatus": {
-          "text": "이미지 생성 중..."
-        },
         "generatingStatus": {
           "text": "이미지 생성 중..."
+        },
+        "stoppedStatus": {
+          "text": "이미지 생성 중지됨"
         }
       },
       "memoizedLink": {
@@ -12951,9 +12948,6 @@
           "executingTool": {
             "label": "도구 실행 중"
           },
-          "generatingImage": {
-            "label": "이미지 생성 중..."
-          },
           "generatingImages": {
             "label": "이미지 생성 중"
           },
@@ -12980,6 +12974,9 @@
           },
           "updatingMemory": {
             "label": "메모리 업데이트 중..."
+          },
+          "working": {
+            "label": "작업 중"
           }
         },
         "internalSearch": {
