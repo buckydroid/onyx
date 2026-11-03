@@ -195,6 +195,96 @@ class _PythonTool(EchoTool):
         return PYTHON_TOOL_NAME
 
 
+@pytest.mark.parametrize("python_enabled", [False, True])
+@pytest.mark.parametrize("already_available", [False, True])
+def test_search_stages_files_only_when_python_needs_them(
+    python_enabled: bool,
+    already_available: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = SearchDoc(
+        document_id="reference",
+        chunk_ind=0,
+        semantic_identifier="Reference",
+        link="https://example.com/reference",
+        blurb="Evidence",
+        source_type=DocumentSource.WEB,
+        boost=0,
+        hidden=False,
+        metadata={},
+        match_highlights=[],
+        file_id="source-file",
+    )
+    search = SearchDocsResponse(
+        search_docs=[document], citation_mapping={1: "reference"}
+    )
+    staged = ChatFile(
+        filename="reference.txt", content=b"Evidence", file_id="source-file"
+    )
+    loaded: list[SearchDoc] = []
+
+    def stage(docs: list[SearchDoc]) -> list[ChatFile]:
+        loaded.extend(docs)
+        return [staged] if docs else []
+
+    monkeypatch.setattr(
+        "onyx.chat.agent.build_python_chat_files_from_search_docs", stage
+    )
+    monkeypatch.setattr(
+        "tests.unit.onyx.agents.fakes.EchoTool.run",
+        lambda *_args, **_kwargs: ToolResult(details=search, content="Evidence [1]"),
+    )
+    llm = ScriptedLLM(
+        [
+            *(
+                Delta(
+                    tool_calls=[
+                        ChatCompletionDeltaToolCall(
+                            id=f"search-{index}",
+                            index=0,
+                            function=ResponseFunctionCall(
+                                name="echo", arguments='{"value":"query"}'
+                            ),
+                        )
+                    ]
+                )
+                for index in range(2)
+            ),
+            Delta(content="Evidence [1]"),
+        ]
+    )
+    agent = ChatAgent(
+        messages=[],
+        tools=[EchoTool(), _PythonTool()] if python_enabled else [EchoTool()],
+        custom_agent_prompt=None,
+        base_system_prompt="",
+        context_files=ExtractedContextFiles(
+            file_texts=[],
+            image_files=[],
+            use_as_search_filter=False,
+            total_token_count=0,
+            file_metadata=[],
+            uncapped_token_count=None,
+        ),
+        persona=None,
+        user_memory_context=None,
+        llm=llm,
+        token_counter=len,
+        chat_files=[staged] if already_available else [],
+    )
+    run_agent(agent, messages=[UserMessage(content="Find evidence twice")], max_steps=3)
+    assert loaded == ([document] if python_enabled and not already_available else [])
+    assert agent.chat_files == ([staged] if python_enabled or already_available else [])
+    results = [
+        item for item in agent.state.messages if isinstance(item, ToolResultMessage)
+    ]
+    assert len(results) == 2
+    for result in results:
+        assert isinstance(result.details, SearchDocsResponse)
+        assert result.details.search_docs == [document]
+        assert result.details.citation_mapping == {1: "reference"}
+
+
 def test_chat_preserves_search_filters_in_accepted_result_and_projection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

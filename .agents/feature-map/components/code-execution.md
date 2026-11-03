@@ -179,7 +179,7 @@ makes a live check, and every live check refreshes that cache.
 raw source files of search hits to `ChatSearchResult.staged_files`
 (`chat/files.py:build_python_chat_files_from_search_docs`, connector-origin
 files only), when the chat offers the Python tool, and skips files already in
-`chat_files` before reading their bytes. `chat/agent.py:ChatAgent._update_tool_context` merges them into
+`chat_files` from an earlier step before reading their bytes. `chat/agent.py:ChatAgent._update_tool_context` merges them into
 `chat_files` after the step and skips a filename already present, so the code in
 a later step can open a spreadsheet that search found. Staging has caps on file
 count, total bytes and parallel uploads. When files are dropped, the model gets
