@@ -2,7 +2,7 @@
 
 **Import:** `import { Chip, CHIP_REMOVE_ATTR, type ChipProps } from "@opal/components";`
 
-A gray, 1.375rem-tall `Interactive` pill around a `Content` (`secondary` preset): a chip-field value, a filter toggle or a popover trigger. For a coloured label that does nothing on click, use [`Tag`](../tag/README.md).
+A gray, 1.375rem-tall `Interactive` pill around a `Content` (`secondary` preset): a chip-field value, a filter toggle or a popover trigger. For a coloured label, use [`Tag`](../tag/README.md).
 
 - **Static** (no `onClick` or `onRemove`): the chip look without the hover, such as a chip field's locked chip.
 - **Removable** (`onRemove`): a remove `Button` after the title, marked with `CHIP_REMOVE_ATTR` for chip-field keyboard flows. Chip fields select a chip by focusing its remove button: the chip turns into a dark pill with an outer ring (Figma State=Focus). Removable titles are always capped.

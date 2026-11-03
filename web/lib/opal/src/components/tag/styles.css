@@ -32,6 +32,12 @@
   border-radius: 0.5rem;
 }
 
+/* A pressed filter tag rings itself in its colour: its own tint covers the
+   selected surface behind it. */
+.opal-auxiliary-tag[data-pressed] {
+  box-shadow: inset 0 0 0 1px var(--opal-tag-icon-color);
+}
+
 /* The title takes the pill's text colour, and the icon --opal-tag-icon-color,
    set inline from the tag's colour. [data-size] outranks the `.interactive`
    Content rules, so a tag inside an interactive row keeps its own colours. */

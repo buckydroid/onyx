@@ -131,6 +131,7 @@ export {
 export {
   Tag,
   TAG_COLORS,
+  type TagButtonProps,
   type TagProps,
   type TagSize,
   type TagVariant,

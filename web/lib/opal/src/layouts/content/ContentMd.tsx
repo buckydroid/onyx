@@ -23,7 +23,7 @@ type ContentMdAuxIcon = "info-gray" | "info-blue" | "warning" | "error";
 
 type ContentMdSuffix = "optional" | (string & {});
 
-type ContentMdTag = TagProps & { tooltip?: string };
+type ContentMdTag = Omit<TagProps, "tooltip"> & { tooltip?: string };
 
 interface ContentMdPresetConfig {
   /** Opal font name for the title. */

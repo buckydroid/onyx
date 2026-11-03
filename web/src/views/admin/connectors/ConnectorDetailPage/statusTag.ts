@@ -73,6 +73,12 @@ const TAGS = {
   failedToRun: { icon: SvgXOctagon, color: "red", labelKey: "failedToRun" },
 } satisfies Record<StatusTag["labelKey"], StatusTag>;
 
+/** The orange look of an open error or warning count, on rows, run lines and the activity panel. */
+export const ERROR_COUNT_TAG = {
+  icon: SvgAlertTriangle,
+  color: "orange",
+} as const satisfies Pick<StatusTag, "icon" | "color">;
+
 /** The tag for the pair's own state, else the latest attempt's. A live attempt outranks repeated failures. */
 export function ccPairStatusTag(
   status: ConnectorCredentialPairStatus,

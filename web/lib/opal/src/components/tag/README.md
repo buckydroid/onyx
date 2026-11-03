@@ -2,9 +2,9 @@
 
 **Import:** `import { Tag, type TagProps } from "@opal/components";`
 
-A small coloured label for status, category or metadata: an icon and a title in a tinted pill, drawn by a `Content` (`secondary` preset, `body` variant, so the title is `secondary-body`). It does nothing on click.
+A small coloured label for status, category or metadata: an icon and a title in a tinted pill, drawn by a `Content` (`secondary` preset, `body` variant, so the title is `secondary-body`). With `onClick` it is a button named by its `tooltip`, and with `aria-pressed` a filter toggle that rings itself in its colour while pressed.
 
-For a removable, clickable or chip-field pill, use [`Chip`](../chip/README.md). For a hover tooltip, wrap the tag in `Tooltip`. `Tag` takes no DOM attributes, but its ref and the props a wrapping `Tooltip` or popover trigger injects still reach its root.
+For a gray, removable or chip-field pill, use [`Chip`](../chip/README.md). For a hover tooltip on a static tag, wrap it in `Tooltip`. `Tag` takes no DOM attributes, but its ref and the props a wrapping `Tooltip` or popover trigger injects still reach its root. On a clickable tag the ref is the pill inside the button. Clickable tags come in sizes `sm`, `20` and `24`, whose focus ring follows the corners.
 
 | Variant   | Background        | Icon             | Label            | Use                                     |
 | --------- | ----------------- | ---------------- | ---------------- | --------------------------------------- |
@@ -14,13 +14,16 @@ For a removable, clickable or chip-field pill, use [`Chip`](../chip/README.md). 
 
 ## Props
 
-| Prop      | Type                               | Default        | Description                     |
-| --------- | ---------------------------------- | -------------- | ------------------------------- |
-| `title`   | `string \| RichStr`                | **(required)** | Tag label text                  |
-| `icon`    | `IconFunctionComponent`            | —              | Optional icon before the title  |
-| `color`   | `TagColor`                         | `"gray"`       | Color variant                   |
-| `variant` | `"default" \| "status" \| "count"` | `"default"`    | How the color is applied        |
-| `size`    | `"sm" \| "md" \| "20" \| "24"`     | `"sm"`         | Size, see the table below       |
+| Prop           | Type                               | Default        | Description                      |
+| -------------- | ---------------------------------- | -------------- | -------------------------------- |
+| `title`        | `string \| RichStr`                | **(required)** | Tag label text                   |
+| `icon`         | `IconFunctionComponent`            | —              | Optional icon before the title   |
+| `color`        | `TagColor`                         | `"gray"`       | Color variant                    |
+| `variant`      | `"default" \| "status" \| "count"` | `"default"`    | How the color is applied         |
+| `size`         | `"sm" \| "md" \| "20" \| "24"`     | `"sm"`         | Size, see the table below        |
+| `onClick`      | `() => void`                       | —              | Makes the tag a button           |
+| `tooltip`      | `string`                           | —              | With `onClick`: tooltip and name |
+| `aria-pressed` | `boolean`                          | —              | With `onClick`: a filter toggle  |
 
 ### `TagSize`
 
@@ -59,4 +62,8 @@ import { SvgAlertTriangle, SvgRefreshCw } from "@opal/icons";
 <Tooltip tooltip="3 warnings" side="top">
   <Tag icon={SvgAlertTriangle} title="3" color="orange" variant="count" />
 </Tooltip>
+
+<Tag icon={SvgAlertTriangle} title="3" color="orange" variant="count" tooltip="View Errors" onClick={openErrors} />
+
+<Tag icon={SvgXOctagon} title="4" color="red" variant="status" size="24" tooltip="4 failed" aria-pressed={failedOnly} onClick={toggleFailed} />
 ```
