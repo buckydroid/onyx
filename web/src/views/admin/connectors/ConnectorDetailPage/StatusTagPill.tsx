@@ -7,18 +7,28 @@ import type { StatusTag } from "@/views/admin/connectors/ConnectorDetailPage/sta
 interface StatusTagPillProps {
   tag: StatusTag;
   size?: TagSize;
+  /** Makes the pill a button, named by its tooltip. */
+  action?: { tooltip: string; onClick: () => void };
 }
 
 /** A pair's or run's status pill: the state's icon and tint with a text-04 label. */
-export default function StatusTagPill({ tag, size }: StatusTagPillProps) {
+export default function StatusTagPill({
+  tag,
+  size,
+  action,
+}: StatusTagPillProps) {
   const tBadges = useTranslations("admin.status.badges");
-  return (
-    <Tag
-      icon={tag.icon}
-      title={tBadges(tag.labelKey)}
-      color={tag.color}
-      variant="status"
-      size={size}
-    />
+  const props = {
+    icon: tag.icon,
+    title: tBadges(tag.labelKey),
+    color: tag.color,
+    variant: "status",
+    size,
+  } as const;
+  // Tag takes `tooltip` and `onClick` together or not at all.
+  return action === undefined ? (
+    <Tag {...props} />
+  ) : (
+    <Tag {...props} {...action} />
   );
 }

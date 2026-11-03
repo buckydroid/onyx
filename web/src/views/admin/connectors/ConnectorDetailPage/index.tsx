@@ -58,6 +58,7 @@ import {
 import {
   ConnectorCredentialPairStatus,
   PermissionSyncStatusEnum,
+  type CCPairRunKind,
 } from "@/lib/connectors/types";
 import type { CCPairFullInfo } from "@/lib/connectors/types";
 import { statusIsNotCurrentlyActive } from "@/lib/connectors/utils";
@@ -66,6 +67,7 @@ import { ConfirmEntityModal } from "@/sections/modals/ConfirmEntityModal";
 import {
   CC_PAIR_STATUS_POLL_MS,
   useActivityChartLinks,
+  useActivityPanelOpen,
   useLatestCCPairRun,
   useStatusChange,
 } from "@/lib/connectors/ccPair/hooks";
@@ -80,8 +82,15 @@ import IndexConfigurationsSection from "@/views/admin/connectors/ConnectorDetail
 import SharingSettingsSection from "@/views/admin/connectors/ConnectorDetailPage/SharingSettingsSection";
 import ScheduleSection from "@/views/admin/connectors/ConnectorDetailPage/ScheduleSection";
 import IndexingTab from "@/views/admin/connectors/ConnectorDetailPage/IndexingTab";
+import {
+  parseRunParams,
+  writeRunParams,
+  type RunRef,
+} from "@/views/admin/connectors/ConnectorDetailPage/runLink";
 import ActivityPanel from "@/views/admin/connectors/ConnectorDetailPage/ActivityPanel";
-import PanelPageBody from "@/views/admin/connectors/shared/PanelPageBody";
+import PanelPageBody, {
+  BESIDE,
+} from "@/views/admin/connectors/shared/PanelPageBody";
 import { useAdminTopBar } from "@/layouts/chromes/AdminTopBarSlot";
 import {
   DEFAULT_PAIR_WINDOW,
@@ -123,6 +132,28 @@ function Main({ ccPairId }: { ccPairId: number }) {
   const [pickedTab, setPickedTab] = useState<ConnectorTab>(() =>
     parseTab(searchParams.get("tab"))
   );
+  // A new object per click, so the same hint opens its run again.
+  const [openRun, setOpenRun] = useState<RunRef | null>(() =>
+    parseRunParams(searchParams)
+  );
+  // Only the pair's id keys the admin's choice and the default count.
+  const activityPanel = useActivityPanelOpen({
+    ccPairId,
+    canResolve: false,
+    canResolveRuns: false,
+  });
+  const panelRef = useRef<HTMLDivElement>(null);
+  // Counts View Errors clicks with no index run to focus, each of which scrolls the panel into view.
+  const [errorsRequest, setErrorsRequest] = useState(0);
+  // Stacked under the column, the panel is out of view, so it scrolls there.
+  useEffect(() => {
+    if (errorsRequest > 0) {
+      panelRef.current?.scrollIntoView({
+        block: "nearest",
+        behavior: "smooth",
+      });
+    }
+  }, [errorsRequest]);
 
   const {
     data: ccPair,
@@ -167,8 +198,26 @@ function Main({ ccPairId }: { ccPairId: number }) {
   }
   // A same-page link, such as a resolved error's later run, or Back changes the address without remounting the page.
   const linkedTab = searchParams.get("tab");
-  useEffect(() => showTab(parseTab(linkedTab)), [linkedTab]);
-  const activityLinks = useActivityChartLinks();
+  const linkedRun = parseRunParams(searchParams);
+  const linkedRunId = linkedRun?.id ?? null;
+  const linkedRunKind = linkedRun?.kind ?? null;
+  useEffect(() => {
+    showTab(parseTab(linkedTab));
+    if (linkedRunId === null || linkedRunKind === null) {
+      setOpenRun(null);
+      return;
+    }
+    // The address also echoes the page's own picks, which already hold this run.
+    setOpenRun((current) =>
+      current?.id === linkedRunId && current.kind === linkedRunKind
+        ? current
+        : { id: linkedRunId, kind: linkedRunKind }
+    );
+  }, [linkedTab, linkedRunId, linkedRunKind]);
+  // A failure line or the Indexing card's View Errors focuses a card in the panel, so the panel shows.
+  const activityLinks = useActivityChartLinks({
+    onFocusAttempt: () => activityPanel.setOpen(true),
+  });
   const clearRange = () => setSliceRange(null);
   // The span belongs to the old chart, so a new window drops it.
   const changeWindow = (picked: PickerWindow) => {
@@ -176,11 +225,25 @@ function Main({ ccPairId }: { ccPairId: number }) {
     setSliceRange(null);
   };
   // replaceState keeps the tab across a reload without a router navigation, which would refetch the page's data.
-  const selectTab = (next: ConnectorTab) => {
+  const selectTab = (next: ConnectorTab, run: RunRef | null = null) => {
     showTab(next);
+    setOpenRun(run);
     const query = new URLSearchParams(searchParams.toString());
     query.set("tab", next);
+    writeRunParams(query, run);
     window.history.replaceState(null, "", `?${query.toString()}`);
+  };
+  const showRun = (id: number, kind: CCPairRunKind) =>
+    selectTab("indexing", { id, kind });
+  // A chart span can exclude the clicked errors, so focusing them drops it. Only an index run's card can take the focus.
+  const focusErrors = (attemptId: number | null) => {
+    setSliceRange(null);
+    if (attemptId !== null) {
+      activityLinks.focusAttempt(attemptId);
+      return;
+    }
+    activityPanel.setOpen(true);
+    setErrorsRequest((n) => n + 1);
   };
   const isSchedulingConnectorDeletionRef = useRef(false);
 
@@ -542,7 +605,6 @@ function Main({ ccPairId }: { ccPairId: number }) {
 
       <PanelPageBody
         panel={
-          // Always shown: this page has no control to reopen a hidden panel.
           <ActivityPanel
             scope={{
               ccPairId: ccPair.id,
@@ -553,6 +615,8 @@ function Main({ ccPairId }: { ccPairId: number }) {
             range={sliceRange}
             onClearRange={clearRange}
             {...activityLinks.panel}
+            className={activityPanel.open ? undefined : BESIDE.panelHidden}
+            ref={panelRef}
           />
         }
       >
@@ -584,6 +648,11 @@ function Main({ ccPairId }: { ccPairId: number }) {
           onStartIndexing={canOperate ? () => void startIndexing() : null}
           startingIndexing={busy}
           onViewChecks={() => setChecksExpandRequest((n) => n + 1)}
+          onOpenRun={showRun}
+          onFocusErrors={focusErrors}
+          panelOpen={activityPanel.open}
+          onTogglePanel={() => activityPanel.setOpen(!activityPanel.open)}
+          panelButtonClassName={BESIDE.hiddenStacked}
         />
         {takesCredential && (
           <PairChecksCard
@@ -631,6 +700,7 @@ function Main({ ccPairId }: { ccPairId: number }) {
                 activityLinks.chart.hoveredAttemptId ??
                 activityLinks.panel.focusAttemptId
               }
+              openRun={openRun}
             />
           </Tabs.Content>
         </ConnectorTabs>
