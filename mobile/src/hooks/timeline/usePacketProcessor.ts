@@ -135,8 +135,7 @@ export function usePacketProcessor(
 
     // The stream stopped, and the answer finished rendering or there is no answer to render.
     isComplete:
-      state.stopPacketSeen &&
-      (renderComplete || state.potentialDisplayGroups.length === 0),
+      state.stopPacketSeen && (renderComplete || displayGroups.length === 0),
 
     onRenderComplete,
     markAllToolsDisplayed,

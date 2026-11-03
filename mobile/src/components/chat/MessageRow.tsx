@@ -158,14 +158,14 @@ function AssistantMessage({
         codeModeWorking={codeModeWorking}
       />
       {/* Images from every image generation step lead the answer. */}
-      {(pacedFinalAnswerComing || stopPacketSeen) &&
-      generatedImages.length > 0 ? (
+      {generatedImages.length > 0 ? (
         <View className="flex-row flex-wrap gap-8 px-12">
           {generatedImages.map((image) => (
             <AttachmentImage
               key={image.file_id}
               fileId={image.file_id}
               size={GENERATED_IMAGE_SIZE}
+              contentFit="contain"
             />
           ))}
         </View>

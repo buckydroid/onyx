@@ -12787,6 +12787,9 @@
         },
         "stoppedStatus": {
           "text": "Geração de imagens interrompida"
+        },
+        "emptyState": {
+          "text": "Nenhuma imagem gerada"
         }
       },
       "memoizedLink": {

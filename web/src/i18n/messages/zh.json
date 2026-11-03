@@ -12787,6 +12787,9 @@
         },
         "stoppedStatus": {
           "text": "图片生成已停止"
+        },
+        "emptyState": {
+          "text": "未生成图片"
         }
       },
       "memoizedLink": {

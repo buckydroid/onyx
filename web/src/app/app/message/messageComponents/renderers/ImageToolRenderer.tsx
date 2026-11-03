@@ -15,8 +15,12 @@ import { isGroupEndPacket } from "@/app/app/message/messageComponents/timeline/p
 import { InMessageImage } from "@/app/app/components/files/images/InMessageImage";
 import GeneratingImageDisplay from "@/app/app/components/tools/GeneratingImageDisplay";
 
+interface GeneratedImageGridProps {
+  images: GeneratedImage[];
+}
+
 /** The generated images of a response, shown at the top of its answer. */
-export function GeneratedImageGrid({ images }: { images: GeneratedImage[] }) {
+export function GeneratedImageGrid({ images }: GeneratedImageGridProps) {
   return (
     <CardGrid gap={4}>
       {images.map((image) => (
@@ -41,10 +45,17 @@ export const ImageToolRenderer: MessageRenderer<
   {}
 > = ({ packets, renderType, stopPacketSeen, children }) => {
   const t = useTranslations("chat.messages");
-  const images = packets.flatMap((packet) =>
-    packet.obj.type === PacketType.IMAGE_GENERATION_TOOL_DELTA
-      ? packet.obj.images
-      : []
+  const images = Array.from(
+    new Map(
+      packets.flatMap((packet) =>
+        packet.obj.type === PacketType.IMAGE_GENERATION_TOOL_DELTA
+          ? packet.obj.images.map((image) => [image.file_id, image] as const)
+          : []
+      )
+    ).values()
+  );
+  const hasResult = packets.some(
+    (packet) => packet.obj.type === PacketType.IMAGE_GENERATION_TOOL_DELTA
   );
   const isComplete = packets.some(isGroupEndPacket);
   const failed = packets.some((p) => p.obj.type === PacketType.ERROR);
@@ -58,7 +69,9 @@ export const ImageToolRenderer: MessageRenderer<
       ? t("imageTool.generatingStatus.text")
       : images.length > 0
         ? t("imageTool.generatedStatus.text", { count: images.length })
-        : t("imageTool.stoppedStatus.text");
+        : hasResult
+          ? t("imageTool.emptyState.text")
+          : t("imageTool.stoppedStatus.text");
 
   const revisedPrompts = Array.from(
     new Set(images.map((image) => image.revised_prompt).filter(Boolean))

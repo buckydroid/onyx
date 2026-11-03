@@ -204,9 +204,9 @@ the sources.
 
 ## Known issues
 
-- **Only text and reasoning render.** Every tool family falls through to
+- **Tool timeline details are not rendered.** Every tool family falls through to
   `null` in `components/chat/renderers/findRenderer.ts`. The comments mark each
-  slot as planned work.
+  slot as planned work. Generated images render separately above the answer.
 - **The mobile enum keeps packet types that the backend never sends**
   (`MESSAGE_END`, `TOP_LEVEL_BRANCHING`), and `chat/messageProcessor.ts` still
   checks `MESSAGE_END` for `isComplete` ([[streaming-protocol]]).

@@ -121,7 +121,12 @@ def build_chat_reminder(
     reminder_text = context.persona_task_prompt
     # Only suggest opening URLs when this agent has the tool.
     if (
-        context.has_open_url_tool
+        not any(
+            part.tool_name == ImageGenerationTool.NAME
+            for result in results
+            for part in tool_result_parts(result)
+        )
+        and context.has_open_url_tool
         and not context.out_of_cycles
         and any(
             part.tool_name == WebSearchTool.NAME

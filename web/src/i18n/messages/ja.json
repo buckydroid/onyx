@@ -12787,6 +12787,9 @@
         },
         "stoppedStatus": {
           "text": "画像の生成を停止しました"
+        },
+        "emptyState": {
+          "text": "生成された画像はありません"
         }
       },
       "memoizedLink": {
