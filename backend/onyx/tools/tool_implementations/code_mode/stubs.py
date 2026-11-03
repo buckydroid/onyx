@@ -413,6 +413,7 @@ def _render_function(
     *,
     tool_name: str,
     returns: str | None = None,
+    usage: str | None = None,
     open_signature: bool = False,
 ) -> str:
     if open_signature:
@@ -430,6 +431,8 @@ def _render_function(
     doc_lines = [_docstring_text(description) or "No description."]
     if tool_name != function_name:
         doc_lines.append(f"Tool name: {tool_name}")
+    if usage:
+        doc_lines.extend(["", _docstring_text(usage)])
     documented = [p for p in parameters if p.description]
     if documented:
         doc_lines.append("")
@@ -571,6 +574,7 @@ def tool_function(
             result_type.annotation,
             tool_name=tool.name,
             returns=spec.returns,
+            usage=spec.usage,
             open_signature=open_signature,
         )
         if len(stub) <= MAX_STUB_CHARS:

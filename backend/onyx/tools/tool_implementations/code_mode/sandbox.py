@@ -18,6 +18,7 @@ from typing import NoReturn
 from pydantic_monty import (
     ExternalException,
     ExternalFuture,
+    ExternalModule,
     ExternalResult,
     ExternalReturnValue,
     ExternalSettledResult,
@@ -130,6 +131,12 @@ IMPORTABLE_MODULES: tuple[str, ...] = (
 )
 
 _SYNC_SLEEP = "system.sleep"
+# The module that also holds every function of a program, so
+# `from functions import f` and `functions.f(...)` work like the globals.
+FUNCTIONS_MODULE = "functions"
+# OS calls of an import: the type checker's stub request and the import itself.
+# Monty answers them from the session's external modules.
+_IMPORT_CALLS: frozenset[str] = frozenset({"import", "import_stubs"})
 _ASYNC_SLEEP = "system.async_sleep"
 # Monty's own message when a segment exceeds `max_feed_duration_secs`.
 _COMPUTE_LIMIT_MESSAGE = re.compile(r"feed time limit exceeded: \S+ > \S+")
@@ -537,7 +544,9 @@ class _Run:
                     else state.resume()
                 )
             elif isinstance(state, FunctionSnapshot):
-                if state.is_os_function and state.function_name == _SYNC_SLEEP:
+                if state.is_os_function and state.function_name in _IMPORT_CALLS:
+                    state = state.resume_auto()
+                elif state.is_os_function and state.function_name == _SYNC_SLEEP:
                     # A resumed program announces the same sleep call again.
                     self.sleeps.setdefault(
                         state.call_id, time.monotonic() + _sleep_seconds(state)
@@ -566,6 +575,8 @@ class _Run:
                     f"{name} is not available in this sandbox; use the tool functions."
                 )
             )
+        # A call through the module, such as `functions.f(...)`, is a call of `f`.
+        name = name.removeprefix(f"{FUNCTIONS_MODULE}.")
         if name in self.plain_functions:
             function, signature = self.plain_functions[name]
             try:
@@ -866,6 +877,14 @@ def _suspend(waiting: _Waiting) -> _Suspended | None:
     return _Suspended(snapshot=snapshot, call_ids=waiting.call_ids)
 
 
+def _functions_module(run: _Run, stubs: str) -> ExternalModule:
+    """The `functions` module: every function of the program, typed by its stubs."""
+    return ExternalModule(
+        {name: _function_reference(name) for name in run.callable_names},
+        stubs=stubs,
+    )
+
+
 @contextmanager
 def _checkout(
     pool: Monty, run: _Run, *, resumed: bool, stubs: str
@@ -889,6 +908,7 @@ def _checkout(
                     type_check_stubs=None if resumed else stubs,
                     type_check_format="concise",
                     os_policy=_OS_POLICY,
+                    external_modules={FUNCTIONS_MODULE: _functions_module(run, stubs)},
                 )
                 try:
                     stack.enter_context(session)

@@ -395,6 +395,8 @@ class CodeModeResultSpec:
     schema: dict[str, JsonValue] | None = None
     # Docstring note on the returned value.
     returns: str | None = None
+    # Docstring note on how a program should call the tool, such as batching.
+    usage: str | None = None
     # The tool numbers its results for citation and needs a citation block.
     cites: bool = False
 

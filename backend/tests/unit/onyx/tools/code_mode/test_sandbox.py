@@ -167,6 +167,29 @@ def test_positional_arguments_are_rejected() -> None:
     assert "keyword arguments only" in result.error
 
 
+def test_functions_import_like_a_module() -> None:
+    recorder = Recorder()
+    result = run(
+        "from functions import search\n"
+        "import functions\n"
+        "a = await search(query='a')\n"
+        "b = await functions.search(query='b')\n"
+        "functions.store('k', 1)\n"
+        "print(a[0]['title'], b[0]['title'])",
+        recorder,
+    )
+    assert result.status == "completed", result
+    assert result.stdout == "About a About b\n"
+    assert [call.function_name for call in recorder.calls] == ["search", "search"]
+    assert result.store_writes == {"k": 1}
+
+
+def test_other_imports_still_fail() -> None:
+    result = run("import requests")
+    assert result.status == "failed"
+    assert result.error is not None and "requests" in result.error
+
+
 def test_unknown_function_is_a_name_error() -> None:
     result = run("missing_tool(query='x')\n")
     assert result.status == "failed"

@@ -1,11 +1,16 @@
 import json
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
 from pydantic import JsonValue
 
 from onyx.llm.models import ToolResult
-from onyx.tools.models import CodeModeExposure, LlmPythonExecutionResult
+from onyx.tools.models import (
+    CodeModeExposure,
+    CodeModeResultSpec,
+    LlmPythonExecutionResult,
+)
 from onyx.tools.tool_implementations.code_mode.stubs import (
     MAX_STUB_CHARS,
     build_tool_stubs,
@@ -72,6 +77,17 @@ def test_built_in_like_search_tool_gets_typed_result() -> None:
     assert "    document: int" in stubs.text
     assert "async def web_search(*, queries: list[str]) -> SearchResults:" in stubs.text
     assert "Search the web for information." in stubs.text
+
+
+class _BatchedSearchTool(FakeWebSearchTool):
+    @property
+    def code_mode_result(self) -> CodeModeResultSpec:
+        return replace(super().code_mode_result, usage="Pass all queries in one call.")
+
+
+def test_usage_note_reaches_the_docstring() -> None:
+    stubs = build_tool_stubs([_BatchedSearchTool(_unused)])
+    assert "snippets.\n\n    Pass all queries in one call.\n\n    Args:" in stubs.text
 
 
 def test_mcp_like_schema_with_odd_names_and_refs() -> None:

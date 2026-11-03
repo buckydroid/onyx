@@ -74,7 +74,7 @@ def code_mode_description(stubs: ToolStubs, limits: SandboxLimits) -> str:
 - The program is type-checked before it runs. A wrong argument name or type in a tool call stops the program before any tool runs.
 - Search results have a `document` number. To cite a result in your answer, print its `document` number and write [n] in the answer, where n is that number.{deferred_note}
 
-Functions:
+Functions (already defined in every program; call them directly, no import needed):
 ```python
 {stubs.listed_text.rstrip()}
 ```"""

@@ -36,6 +36,7 @@ refer to by using matching keywords to other parts of the prompt and reminders.
 
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -101,6 +102,7 @@ from onyx.llm.interfaces import LLM
 from onyx.llm.models import ToolDefinition, ToolResult, ToolResultMessage
 from onyx.natural_language_processing.search_nlp_models import EmbeddingModel
 from onyx.onyxbot.slack.models import SlackContext
+from onyx.prompts.tool_prompts import CODE_MODE_SEARCH_USAGE
 from onyx.secondary_llm_flows.decision_rerank_expansion import (
     MAX_DECISION_QUESTIONS,
     rank_sections_listwise,
@@ -709,7 +711,7 @@ class SearchTool(Tool):
 
     @property
     def code_mode_result(self) -> CodeModeResultSpec:
-        return SEARCH_RESULTS_CODE_MODE_RESULT
+        return replace(SEARCH_RESULTS_CODE_MODE_RESULT, usage=CODE_MODE_SEARCH_USAGE)
 
     """For explicit tool calling"""
 

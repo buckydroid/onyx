@@ -340,7 +340,12 @@ health calls are not retried.
     `tools/tool_implementations/code_mode/code_mode_tool.py:with_code_mode`
     raises otherwise. The code mode tools are `DIRECT` too. MCP functions are
     named `<server>__<tool>`; the description names the MCP servers with
-    deferred functions in one fixed paragraph. Image
+    deferred functions in one fixed paragraph. Every function is also an
+    attribute of the importable module `functions`
+    (`tools/tool_implementations/code_mode/sandbox.py:FUNCTIONS_MODULE`), so `from functions import f`
+    works like the global. `CodeModeResultSpec.usage` adds a code-mode-only
+    docstring note; `internal_search` uses it to ask for all queries of one
+    need in one call, since each call runs its own retrieval pipeline. Image
     generation is nested: a program gets `list[ImageResult]` (`file_id`,
     `revised_prompt`), and the user sees the images without the program
     printing them. Code mode keeps `forced_tool_id` only for a `DIRECT` tool;

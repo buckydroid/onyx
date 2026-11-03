@@ -21,7 +21,7 @@ If it is unclear which tool to use, consider using multiple in parallel to be ef
 
 CODE_MODE_GUIDANCE = """
 ## execute_code
-Call tools from Python programs with `execute_code`; its description lists the functions. Batch independent searches and reads in one `execute_code` with `asyncio.gather`, and inspect every result. Keep dependent or judgment-based follow-ups in a later call. Avoid unnecessary output.
+Call tools from Python programs with `execute_code`; its description lists the functions. Batch independent calls in one `execute_code` with `asyncio.gather`, and inspect every result. Give `internal_search` all queries for one information need in a single call. Keep dependent or judgment-based follow-ups in a later call. Avoid unnecessary output.
 """.lstrip()
 
 
@@ -33,6 +33,16 @@ Use `internal_search` to search connected applications for information. Some exa
 - Keyword Queries: queries that are heavily keyword based are often internal document search queries.
 - Ambiguity: questions about something that is not widely known or understood.
 """.lstrip()
+
+# Code mode only: each internal_search call runs its own retrieval pipeline.
+CODE_MODE_SEARCH_USAGE = (
+    "Each call runs a full retrieval pipeline with several model calls, so it is "
+    "expensive. Pass all queries for one information need in one call, for example "
+    '`await internal_search(queries=["first phrasing", "second phrasing"])`. Do not '
+    "split them into one call per query, and do not `asyncio.gather` single-query "
+    "calls. Search again only for a follow-up that depends on earlier results."
+)
+
 
 # Direct tool calls only: a code mode program can run many searches.
 INTERNAL_SEARCH_QUERY_LIMIT = """
