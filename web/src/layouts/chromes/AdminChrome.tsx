@@ -4,7 +4,7 @@ import { IconLoader } from "@opal/loaders";
 import AdminSidebar from "@/sections/sidebar/AdminSidebar";
 import { usePathname, useRouter } from "next/navigation";
 import type { Route } from "next";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useSettings } from "@/lib/settings/hooks";
 import { useAdminDocumentTitle } from "@/lib/app/hooks";
 import { useUser } from "@/providers/UserProvider";
@@ -24,6 +24,7 @@ import {
 import { OpenSearchResourceBanner } from "@/sections/banners/OpenSearchResourceWarning";
 import LiteModeIndexingNotice from "@/sections/admin/LiteModeIndexingNotice";
 import { useTranslations } from "next-intl";
+import { AdminTopBarSlotContext } from "@/layouts/chromes/AdminTopBarSlot";
 
 export interface AdminChromeProps {
   children: React.ReactNode;
@@ -43,6 +44,7 @@ export default function AdminChrome({
   useAdminDocumentTitle();
   const router = useRouter();
   const { adminCapabilities: liveAdminCapabilities, isUserLoading } = useUser();
+  const [topBarSlot, setTopBarSlot] = useState<HTMLElement | null>(null);
 
   // Seed only in flight — otherwise logout would leave the page authorized by a stale seed.
   const adminCapabilities = isUserLoading
@@ -105,18 +107,28 @@ export default function AdminChrome({
               column always needs a control to bring it back. */}
         {isMobile && (
           <RootLayout.Header>
-            <div className="h-full flex items-center px-4 py-2">
+            <Section
+              flexDirection="row"
+              justifyContent="start"
+              gap={1}
+              padding={2}
+              width="auto"
+              className="mx-2"
+            >
               <Button
                 prominence="internal"
                 icon={SvgSidebar}
                 aria-label={t("adminChrome.openSidebar.ariaLabel")}
                 onClick={() => setFolded(false)}
               />
-            </div>
+              <div ref={setTopBarSlot} className="contents" />
+            </Section>
           </RootLayout.Header>
         )}
         <OpenSearchResourceBanner />
-        <RootLayout.MainContent>{content}</RootLayout.MainContent>
+        <AdminTopBarSlotContext.Provider value={isMobile ? topBarSlot : null}>
+          <RootLayout.MainContent>{content}</RootLayout.MainContent>
+        </AdminTopBarSlotContext.Provider>
       </RootLayout.App>
     </RootLayout.Root>
   );
