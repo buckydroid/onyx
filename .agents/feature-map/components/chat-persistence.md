@@ -273,8 +273,9 @@ Community downgrade clears it ([[billing]]).
 3. `reserved-row-resolves` **A reserved assistant row must resolve.** Once
    `ChatTurnExecution.run` starts, `chat/persistence.py:ChatResponsePersistence`
    saves every outcome: an answer, a stop, a run failure, and a startup
-   failure (`save_failure`, which leaves a NULL status, empty text and `error`
-   set). The expected unresolved rows are these. A content-persisting answer
+   failure. Ordinary startup failures use `save_failure` with a NULL status,
+   empty text and `error` set. Preparation timeouts instead save a minimal
+   cancelled runtime record with a `DEADLINE` failure. The expected unresolved rows are these. A content-persisting answer
    whose final save fails or is rejected after ownership loss stays `RUNNING`
    with the placeholder text. A `USAGE_ONLY` answer whose Postgres write fails
    keeps the placeholder with a NULL status. A turn that `chat/execution.py:start_chat_turn`
@@ -327,13 +328,19 @@ Community downgrade clears it ([[billing]]).
    `chat/renderer.py:ToolRenderer`, so change rendering there, not in one
    caller. Runtime replay sets `stop_reason=user_cancelled` from a `CANCELLED`
    status, and `timed_out` when the run's failure is `DEADLINE`
-   (`chat/presentation.py:overall_stop`). Otherwise `CANCELLED` does not mean
+   (`chat/presentation.py:overall_stop`). A preparation timeout saves a minimal
+   cancelled `RunState` with a `DEADLINE` failure through
+   `ChatResponsePersistence.save_failure`. Saved answer text also distinguishes
+   a time limit from a user Stop. History excludes deadline cancellations from
+   error fields so clients retain the partial answer. Otherwise `CANCELLED` does not mean
    the user pressed Stop: lost admission, a lost ownership lease or a control
    failure cancels the run too, and it is saved and replayed like Stop, with
    "Generation was stopped by the user." and no error. Legacy replay has its own builders in
    `server/query_and_chat/session_loading.py`; check every `in_code_tool_id`
    branch when a legacy display changes. It finds a stopped answer by the text
-   "generation was stopped", which
+   "generation was stopped"; it does not recognize the time-limit text. Content-persisting
+   deadline cancellations use runtime replay; `USAGE_ONLY` sessions take the legacy path.
+   The legacy marker is what
    `db/chat_response.py:save_chat_response_to_db` appends. Legacy dispatch is
    on the class name ([[tools-framework#replay-by-class-name]]), and its
    `run_python` builder parses the saved result JSON

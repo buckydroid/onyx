@@ -88,7 +88,7 @@ _stream_chat_turn               ChatTurnExecution.run                ChatTurnExe
     clear_stop, admission.publish   admission every 5 s; owner         ChatRunStore (content kept) or
     publish IDs to ChatDelivery     leases every 10 s (content kept)     persistence view; register saved agents
     start control thread          _poll_responses: outcomes, idle      Agent.start(background=False)
-  yield from ChatStream (reader)  all drained: OverallStop (user Stop)   ResponsePresenter -> Emitter -> ChatDelivery
+  yield from ChatStream (reader)  all drained: OverallStop (user Stop or deadline)   ResponsePresenter -> Emitter -> ChatDelivery
                                     delivery.finish, admission.release RunStore.save -> ChatResponsePersistence
 ```
 
@@ -162,7 +162,10 @@ turn's deadline (`CHAT_EXECUTION_TIMEOUT_S` after the turn starts) as its
 `deadline_at`, and the run's own timer cancels it there. The turn's signal is
 cancelled only by a backstop: `_poll_control` cancels it with reason `deadline`
 when work remains `_DEADLINE_BACKSTOP` (30 s) past the deadline, for example
-preparation that never started a run. When no response worker and no
+preparation that never started a run. The response keeps that cancellation
+reason; `ChatResponsePersistence.save_failure` saves a cancelled `RunState` with
+a `DEADLINE` failure even when preparation never created a run.
+When no response worker and no
 owned run remains, it finishes delivery and then releases the admission. A child
 run's owner lease also keeps the turn and its admission alive. API shutdown
 waits up to `CHAT_EXECUTION_TIMEOUT_S` for `chat/execution.py:chat_turn_work`,
@@ -227,8 +230,8 @@ termination grace period is much shorter, so it ends running turns first
    `ChatRunStore.poll_control` cancels one run when its owner lease is lost or
    its `chat_response_stop:<id>` key is set. Cancellation reaches every run,
    child and tool, and `ChatTurnExecution._publish` drops packets after it. It
-   does not interrupt a blocked provider read or a running tool; the turn keeps
-   its admission until they return. The stop key is per stream ID, so a late
+   does not forcibly interrupt blocked provider reads or tools that ignore their
+   cancellation signal; the turn keeps its admission until owned work drains. The stop key is per stream ID, so a late
    stop cannot cancel the next message when the caller passes `stream_id`, as
    the web client does. Without `stream_id`, Stop targets the stream in flight
    at request time. Replay shows `user_cancelled` from the saved
@@ -243,8 +246,10 @@ termination grace period is much shorter, so it ends running turns first
    (`chat/presentation.py:overall_stop`, from the run's `DEADLINE` failure).
    When the backstop cancels the turn, the control thread publishes
    `ChatTurnExecution._turn_stop`, `OverallStop(stop_reason="timed_out")` from a
-   `DEADLINE` failure, after all work drains, unless a run's stop already reached
-   the client (`_stop_delivered`), so the stream gets exactly one stop packet.
+   `DEADLINE` failure, after all work drains. It sends a tagged fallback for each
+   model whose stop has not reached the client (`_stopped_models`). A completed
+   model cannot hide another model's cancellation. The fallback uses each
+   saved response outcome, so a later Stop cannot replace an earlier deadline.
    The first cancellation reason wins, so a Stop before the deadline stays
    `user_cancelled`.
    After any other cancel, the presenter's packets are dropped, and
@@ -319,7 +324,8 @@ termination grace period is much shorter, so it ends running turns first
   in tools" (`chat/execution.py:create_chat_agent`). See the "Force a tool call"
   recipe in [[tools-framework]].
 - **Stop waits for blocked work.** Cancellation takes effect when a provider
-  read returns or times out, and a running tool keeps going until it returns.
+  read returns or times out. Tools that honor `ToolInvocation.cancellation` can
+  stop earlier; tools that ignore it keep running until they return.
   Slow cache calls on the control thread also delay the next Stop check.
 - **Anonymous users cannot stop.** `stop_chat_session` uses
   `require_permission(Permission.WRITE_CHAT)` without `allow_anonymous`, so an

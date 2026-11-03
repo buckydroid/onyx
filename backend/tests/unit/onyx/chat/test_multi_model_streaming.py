@@ -9,7 +9,7 @@ import asyncio
 import contextvars
 import threading
 import time
-from collections.abc import Callable, Generator
+from collections.abc import Callable, Generator, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
@@ -46,6 +46,7 @@ from onyx.chat.models import (
     ReservedChatResponse,
 )
 from onyx.chat.persistence import ChatResponsePersistence
+from onyx.chat.presentation import replay_response
 from onyx.chat.process_message import (
     _stream_chat_turn,
     gather_stream_full,
@@ -3333,7 +3334,7 @@ def test_execution_deadline_cancels_work_but_waits_for_preparation_to_drain(
             _wait_for_chat_workers(chat_workers)
 
 
-def _stop_reasons(packets: list[AnswerStreamPart]) -> list[str | None]:
+def _stop_reasons(packets: Sequence[AnswerStreamPart]) -> list[str | None]:
     return [
         packet.obj.stop_reason
         for packet in packets
@@ -3375,7 +3376,14 @@ def test_preparation_that_outlives_the_deadline_ends_the_turn_as_timed_out(
             )
             assert _stop_reasons(reader.result(timeout=5)) == ["timed_out"]
             assert turn.cancellation.reason == "deadline"
-            assert outcome.result(timeout=5).response.cancelled
+            response = outcome.result(timeout=5).response
+            assert response.cancelled
+            assert response.response is not None
+            assert response.response.failure is not None
+            assert response.response.failure.kind == RunFailureKind.DEADLINE
+            assert _stop_reasons(replay_response(response.response, {}, {}, {})) == [
+                "timed_out"
+            ]
             _wait_for_chat_workers(chat_workers)
         finally:
             turn.delivery.reader.close()
@@ -3464,3 +3472,98 @@ def test_initialization_errors_preserve_model_identity(
     assert packet.details == (
         {"model_index": model_index} if model_index is not None else {}
     )
+
+
+@pytest.mark.parametrize("deadline", [False, True])
+def test_completed_model_does_not_hide_a_second_models_stop(
+    chat_workers: list[Future[Run | None]], deadline: bool
+) -> None:
+    turn = ChatTurnExecution(_make_setup(n_models=2), MagicMock())
+    first_stopped = threading.Event()
+    original_publish = turn._publish
+
+    def publish(packet: Packet) -> None:
+        original_publish(packet)
+        if isinstance(packet.obj, OverallStop) and packet.placement.model_index == 0:
+            first_stopped.set()
+
+    def prepare(
+        _setup: object,
+        _user: object,
+        index: int,
+        cancellation: CancellationSignal,
+        _auto_filters: bool,
+    ) -> ChatAgent:
+        if index == 0:
+            return _chat_agent(
+                Agent(
+                    FakeModelClient(
+                        lambda *_: AssistantMessage(content=[TextContent(text="Done")])
+                    ),
+                    generation_context=GenerationContext(flow=LLMFlow.CHAT_RESPONSE),
+                )
+            )
+        assert first_stopped.wait(5)
+        if not deadline:
+            turn._stopped_by_user = True
+        turn.cancellation.cancel("deadline" if deadline else "requested")
+        cancellation.check()
+        raise AssertionError("Preparation was not cancelled")
+
+    with (
+        patch.object(turn, "_publish", side_effect=publish),
+        patch("onyx.chat.execution.create_chat_agent", side_effect=prepare),
+        patch("onyx.chat.history_store.save_chat_response_to_db"),
+    ):
+        _launch_turn(turn)
+        try:
+            packets = list(turn.delivery.reader)
+            stops = [
+                (packet.placement.model_index, packet.obj.stop_reason)
+                for packet in packets
+                if isinstance(packet, Packet) and isinstance(packet.obj, OverallStop)
+            ]
+            assert stops == [
+                (0, "finished"),
+                (1, "timed_out" if deadline else "user_cancelled"),
+            ]
+        finally:
+            turn.delivery.reader.close()
+            _wait_for_chat_workers(chat_workers)
+
+
+def test_user_stop_after_run_deadline_keeps_live_and_saved_timeout(
+    chat_workers: list[Future[Run | None]],
+) -> None:
+    outcome = Future[ChatResponseOutcome]()
+    with patch("onyx.chat.execution.CHAT_EXECUTION_TIMEOUT_S", 0):
+        turn = ChatTurnExecution(_make_setup(), MagicMock(), outcome)
+    prepared = _chat_agent(
+        Agent(
+            FakeModelClient(lambda *_: pytest.fail("Expired work must not generate")),
+            generation_context=GenerationContext(flow=LLMFlow.CHAT_RESPONSE),
+        )
+    )
+    publish = turn._publish
+
+    def stop_before_delivery(packet: Packet) -> None:
+        if isinstance(packet.obj, OverallStop):
+            assert packet.obj.stop_reason == "timed_out"
+            turn._stopped_by_user = True
+            turn.cancellation.cancel()
+        publish(packet)
+
+    with (
+        patch.object(turn, "_publish", side_effect=stop_before_delivery),
+        patch("onyx.chat.execution.create_chat_agent", return_value=prepared),
+        patch("onyx.chat.history_store.save_chat_response_to_db"),
+    ):
+        _launch_turn(turn)
+        try:
+            assert _stop_reasons(list(turn.delivery.reader)) == ["timed_out"]
+            response = outcome.result(timeout=5).response.response
+            assert response is not None
+            assert _stop_reasons(replay_response(response, {}, {}, {})) == ["timed_out"]
+        finally:
+            turn.delivery.reader.close()
+            _wait_for_chat_workers(chat_workers)

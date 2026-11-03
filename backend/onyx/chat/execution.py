@@ -211,8 +211,9 @@ class ChatTurnExecution:
         )
         self._auto_filters = False
         self._stopped_by_user = False
-        # Whether a stop packet reached the client; the turn then sends none of its own.
-        self._stop_delivered = False
+        # Each model gets one stop, including models still preparing at cancellation.
+        self._stopped_models: set[int] = set()
+        self._response_stops: dict[int, OverallStop] = {}
         self._last_refresh = self._last_stop_check = time.monotonic()
         # Each response run cancels itself at this time and records a DEADLINE failure.
         self._deadline_at = datetime.now(timezone.utc) + timedelta(
@@ -252,7 +253,9 @@ class ChatTurnExecution:
     def _publish(self, packet: Packet) -> None:
         if not self.cancellation.cancelled:
             self.delivery.publish(packet)
-            self._stop_delivered |= isinstance(packet.obj, OverallStop)
+            if isinstance(packet.obj, OverallStop):
+                with self._lock:
+                    self._stopped_models.add(packet.placement.model_index or 0)
 
     def run(self, *, startup_error: BaseException | None = None) -> None:
         try:
@@ -329,9 +332,20 @@ class ChatTurnExecution:
                 if not self.delivery.is_closing:
                     stop = self._turn_stop()
                     if stop is not None:
-                        self.delivery.publish(
-                            Packet(placement=Placement(turn_index=0), obj=stop)
-                        )
+                        with self._lock:
+                            pending = (
+                                set(range(len(self.setup.responses)))
+                                - self._stopped_models
+                            )
+                        for index in sorted(pending):
+                            self.delivery.publish(
+                                Packet(
+                                    placement=Placement(
+                                        turn_index=0, model_index=index
+                                    ),
+                                    obj=self._response_stops.get(index, stop),
+                                )
+                            )
                     self.delivery.finish()
                 if self.delivery.finished.done() and self._clear_processing_status():
                     return
@@ -378,6 +392,12 @@ class ChatTurnExecution:
                     continue
                 if not worker_done:
                     continue
+            if persistence.outcome.done() and persistence.outcome.exception() is None:
+                snapshot = persistence.outcome.result().response.response
+                if snapshot is not None:
+                    self._response_stops[persistence.model_index] = overall_stop(
+                        snapshot.status, snapshot.failure
+                    )
             del self._response_workers[worker]
 
     def _clear_processing_status(self) -> bool:
@@ -398,7 +418,11 @@ class ChatTurnExecution:
         index = persistence.model_index
         cancellation = CancellationSignal()
         links = ExitStack()
-        links.enter_context(self.cancellation.on_cancel(cancellation.cancel))
+        links.enter_context(
+            self.cancellation.on_cancel(
+                lambda: cancellation.cancel(self.cancellation.reason or "requested")
+            )
+        )
         observation_token = CURRENT_QUERY_OBSERVATION.set(self._query_observation)
         try:
             if startup_error is not None:
@@ -524,7 +548,7 @@ class ChatTurnExecution:
             return run
         except BaseException as failure:
             try:
-                persistence.save_failure(failure)
+                persistence.save_failure(failure, cancellation.reason)
             except Exception:
                 logger.exception(
                     "Response startup finalization failed for model %d", index
@@ -537,8 +561,6 @@ class ChatTurnExecution:
 
     def _turn_stop(self) -> OverallStop | None:
         """The stop packet the turn sends when it, not a response run, ended the work."""
-        if self._stop_delivered:
-            return None
         if self.cancellation.reason == "deadline":
             return overall_stop(
                 RunStatus.CANCELLED,
