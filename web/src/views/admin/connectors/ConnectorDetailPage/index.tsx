@@ -160,6 +160,14 @@ function Main({ ccPairId }: { ccPairId: number }) {
   );
   // A picked span of the chart brushes it and narrows the runs and activity to it.
   const [sliceRange, setSliceRange] = useState<SliceRange | null>(null);
+  function showTab(next: ConnectorTab) {
+    setPickedTab(next);
+    // The span's only clear control is the chart's picker, which leaves with the Indexing tab.
+    if (next !== "indexing") setSliceRange(null);
+  }
+  // A same-page link, such as a resolved error's later run, or Back changes the address without remounting the page.
+  const linkedTab = searchParams.get("tab");
+  useEffect(() => showTab(parseTab(linkedTab)), [linkedTab]);
   const activityLinks = useActivityChartLinks();
   const clearRange = () => setSliceRange(null);
   // The span belongs to the old chart, so a new window drops it.
@@ -169,9 +177,7 @@ function Main({ ccPairId }: { ccPairId: number }) {
   };
   // replaceState keeps the tab across a reload without a router navigation, which would refetch the page's data.
   const selectTab = (next: ConnectorTab) => {
-    setPickedTab(next);
-    // The span's only clear control is the chart's picker, which leaves with the Indexing tab.
-    if (next !== "indexing") setSliceRange(null);
+    showTab(next);
     const query = new URLSearchParams(searchParams.toString());
     query.set("tab", next);
     window.history.replaceState(null, "", `?${query.toString()}`);
