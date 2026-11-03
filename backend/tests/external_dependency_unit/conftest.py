@@ -1,12 +1,13 @@
 import logging
 import os
 from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from typing import Protocol
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi_users.password import PasswordHelper
-from sqlalchemy import create_engine, delete, or_, select
+from sqlalchemy import create_engine, delete, or_, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import NullPool
@@ -23,12 +24,18 @@ from onyx.db.llm import (
 from onyx.db.models import (
     ChatSession,
     MCPServer,
+    MCPServer__UserGroup,
     Persona,
+    Persona__DocumentSet,
+    Persona__PersonaLabel,
     Persona__User,
+    Persona__UserGroup,
+    Project__UserFile,
     Tool,
     User,
     User__UserGroup,
     UserFile,
+    UserProject,
 )
 from onyx.db.users import assign_user_to_default_groups__no_commit
 from onyx.file_store.file_store import get_default_file_store
@@ -212,22 +219,15 @@ class MakeTestUser(Protocol):
 def delete_test_users_and_owned_rows(
     db_session: Session, user_ids: Sequence[UUID], emails: Sequence[str]
 ) -> None:
-    """Delete test users with their chat sessions, personas, MCP servers and
-    tools. MCP tools and chat messages go by cascade."""
+    """Delete test-owned chat resources and their non-cascading links."""
     db_session.rollback()
-    persona_ids = (
-        select(Persona__User.persona_id)
-        .where(Persona__User.user_id.in_(user_ids))
-        .union(select(Persona.id).where(Persona.user_id.in_(user_ids)))
-    )
+    persona_ids = select(Persona.id).where(Persona.user_id.in_(user_ids))
     persona_id_list = list(db_session.scalars(persona_ids))
+    db_session.execute(delete(ChatSession).where(ChatSession.user_id.in_(user_ids)))
     db_session.execute(
-        delete(ChatSession).where(
-            or_(
-                ChatSession.user_id.in_(user_ids),
-                ChatSession.persona_id.in_(persona_id_list),
-            )
-        )
+        update(ChatSession)
+        .where(ChatSession.persona_id.in_(persona_id_list))
+        .values(persona_id=None)
     )
     db_session.execute(
         delete(Persona__User).where(
@@ -237,9 +237,40 @@ def delete_test_users_and_owned_rows(
             )
         )
     )
+    for association in (
+        Persona__DocumentSet,
+        Persona__UserGroup,
+        Persona__PersonaLabel,
+    ):
+        db_session.execute(
+            delete(association).where(association.persona_id.in_(persona_id_list))
+        )
     db_session.execute(delete(Persona).where(Persona.id.in_(persona_id_list)))
+    server_ids = select(MCPServer.id).where(MCPServer.owner.in_(emails))
+    db_session.execute(
+        delete(MCPServer__UserGroup).where(
+            MCPServer__UserGroup.mcp_server_id.in_(server_ids)
+        )
+    )
     db_session.execute(delete(MCPServer).where(MCPServer.owner.in_(emails)))
     db_session.execute(delete(Tool).where(Tool.user_id.in_(user_ids)))
+    project_ids = select(UserProject.id).where(UserProject.user_id.in_(user_ids))
+    file_ids = select(UserFile.id).where(UserFile.user_id.in_(user_ids))
+    db_session.execute(
+        update(ChatSession)
+        .where(ChatSession.project_id.in_(project_ids))
+        .values(project_id=None)
+    )
+    db_session.execute(
+        delete(Project__UserFile).where(
+            or_(
+                Project__UserFile.project_id.in_(project_ids),
+                Project__UserFile.user_file_id.in_(file_ids),
+            )
+        )
+    )
+    db_session.execute(delete(UserFile).where(UserFile.user_id.in_(user_ids)))
+    db_session.execute(delete(UserProject).where(UserProject.user_id.in_(user_ids)))
     _delete_users(db_session, user_ids)
     db_session.commit()
 
@@ -270,14 +301,11 @@ def make_test_user(db_session: Session) -> Generator[MakeTestUser, None, None]:
             )
 
 
-TEST_LLM_PROVIDER_NAME = "test-provider"
-
-
-def ensure_default_llm_provider(db_session: Session) -> None:
+def ensure_default_llm_provider(db_session: Session, provider_name: str) -> None:
     """Make the test provider's model the default chat model."""
     provider = upsert_llm_provider(
         llm_provider_upsert_request=LLMProviderUpsertRequest(
-            name=TEST_LLM_PROVIDER_NAME,
+            name=provider_name,
             provider=LlmProviderNames.OPENAI,
             api_key=os.environ.get("OPENAI_API_KEY", "test"),
             is_public=True,
@@ -296,26 +324,31 @@ def ensure_default_llm_provider(db_session: Session) -> None:
     )
 
 
-@pytest.fixture
-def default_llm_provider(db_session: Session) -> Generator[None, None, None]:
-    """`ensure_default_llm_provider` for one test; teardown restores the default
-    chat model and removes the test provider when the test created it."""
+@contextmanager
+def temporary_default_llm_provider(db_session: Session) -> Generator[None, None, None]:
+    """Use a private test provider and restore the previous chat default."""
     previous = fetch_default_model(db_session, LLMModelFlowType.CHAT)
     previous_default = (
         None if previous is None else (previous.llm_provider_id, previous.name)
     )
-    existed = fetch_existing_llm_provider(TEST_LLM_PROVIDER_NAME, db_session)
-    provider_existed = existed is not None
-    ensure_default_llm_provider(db_session)
+    provider_name = f"test-provider-{uuid4().hex}"
     try:
+        ensure_default_llm_provider(db_session, provider_name)
         yield
     finally:
         db_session.rollback()
         if previous_default is not None:
             update_default_model(db_session, *previous_default, LLMModelFlowType.CHAT)
-        provider = fetch_existing_llm_provider(TEST_LLM_PROVIDER_NAME, db_session)
-        if not provider_existed and provider is not None:
+        # Removing the temporary provider also removes its default-flow rows.
+        provider = fetch_existing_llm_provider(provider_name, db_session)
+        if provider is not None:
             remove_llm_provider(db_session, provider.id)
+
+
+@pytest.fixture
+def default_llm_provider(db_session: Session) -> Generator[None, None, None]:
+    with temporary_default_llm_provider(db_session):
+        yield
 
 
 @pytest.fixture(scope="module")
