@@ -239,6 +239,14 @@ Policy precedence is in [[craft-external-apps]].
     set afterwards. The reload only restamps `mcp_config_hash`; it does not push
     skill files.
 
+14. `mcp-cancellation-is-local` **Cancellation stops the local MCP wait.**
+    `server/features/mcp/client.py:_run_until_cancelled` cancels the local task
+    and drains its cleanup before raising `AgentCancelled`. Remote work may
+    continue if the server does not honor cancellation.
+    `tools/tool_implementations/mcp/mcp_tool.py:MCPTool` records
+    `MCPToolCallStatus.CANCELLED` and re-raises the signal. It does not return a
+    tool error, record success, or treat cancellation as an authentication failure.
+
 `Tool.enabled` gates MCP tools everywhere and OpenAPI tools only in Default
 Chat: see [[plugins#openapi-enabled-default-chat-only]].
 

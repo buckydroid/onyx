@@ -8,7 +8,6 @@ and handles connection initialization, session management, and protocol communic
 import asyncio
 import json
 from collections.abc import Callable, Coroutine
-from contextlib import suppress
 from enum import Enum
 from typing import Any, Dict, TypeVar
 
@@ -189,25 +188,38 @@ def _run_until_cancelled(
     cancel the coroutine, when `cancellation` fires first."""
     if cancellation is None:
         return run_async_sync_no_cancel(coro)
+    if cancellation.cancelled:
+        coro.close()
+        raise AgentCancelled()
     signal = cancellation
 
     async def until_cancelled() -> T | _Cancelled:
         loop = asyncio.get_running_loop()
         stopped = asyncio.Event()
-        work = asyncio.ensure_future(coro)
+
+        async def run_if_active() -> T | _Cancelled:
+            if signal.cancelled:
+                coro.close()
+                return _Cancelled()
+            return await coro
 
         def stop_soon() -> None:
             loop.call_soon_threadsafe(stopped.set)
 
         with signal.on_cancel(stop_soon):
+            work = asyncio.ensure_future(run_if_active())
             stop = asyncio.ensure_future(stopped.wait())
             await asyncio.wait({work, stop}, return_when=asyncio.FIRST_COMPLETED)
             stop.cancel()
         if work.done():
             return work.result()
         work.cancel()
-        with suppress(asyncio.CancelledError, Exception):
+        try:
             await work
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception("MCP request cleanup failed after cancellation")
         return _Cancelled()
 
     result = run_async_sync_no_cancel(until_cancelled())

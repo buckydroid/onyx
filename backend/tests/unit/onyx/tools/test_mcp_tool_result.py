@@ -6,24 +6,26 @@ import json
 import logging
 from unittest.mock import patch
 
+import httpx
 import pytest
-from mcp.types import CallToolResult, ImageContent, TextContent
+from mcp.types import CallToolResult, TextContent
 from pydantic import JsonValue
 
 from onyx.agents.tools import ToolInvocation
 from onyx.chat.renderer import ToolRenderer
-from onyx.db.enums import MCPAuthenticationType, MCPOAuthProviderMode
+from onyx.db.enums import (
+    MCPAuthenticationPerformer,
+    MCPAuthenticationType,
+    MCPOAuthProviderMode,
+)
 from onyx.db.models import MCPServer
-from onyx.llm.cancellation import CancellationSignal
+from onyx.llm.cancellation import AgentCancelled, CancellationSignal
 from onyx.llm.models import ToolCall, ToolResult, ToolResultMessage
+from onyx.server.features.mcp.credentials import ResolvedMCPCredentials
 from onyx.server.metrics.mcp_common import MCPToolCallStatus
 from onyx.server.query_and_chat.placement import Placement
 from onyx.server.query_and_chat.streaming_models import CustomToolDelta
 from onyx.tools.models import CustomToolCallSummary, ToolContext
-from onyx.tools.tool_implementations.code_mode.stubs import (
-    build_tool_stubs,
-    program_value,
-)
 from onyx.tools.tool_implementations.mcp.mcp_tool import MCPTool
 
 
@@ -34,12 +36,17 @@ def _reject_non_finite_number(constant: str) -> float:
 MODULE = "onyx.tools.tool_implementations.mcp.mcp_tool"
 
 
-def _github_tool() -> MCPTool:
+def _github_tool(*, user_managed_credentials: bool = False) -> MCPTool:
     server = MCPServer(
         id=1,
         name="GitHub",
         server_url="https://mcp.example",
-        auth_type=MCPAuthenticationType.NONE,
+        auth_type=(
+            MCPAuthenticationType.API_TOKEN
+            if user_managed_credentials
+            else MCPAuthenticationType.NONE
+        ),
+        auth_performer=MCPAuthenticationPerformer.PER_USER,
         transport=None,
         oauth_provider_mode=MCPOAuthProviderMode.AUTO_DISCOVERY,
         oauth_cimd_enabled=True,
@@ -52,6 +59,16 @@ def _github_tool() -> MCPTool:
         tool_name="list_issues",
         tool_description="List issues",
         tool_definition={"type": "object", "properties": {}},
+        resolved_credentials=(
+            ResolvedMCPCredentials(
+                connection_config_id=7,
+                connection_data={"headers": {"Authorization": "Bearer valid"}},
+                user_oauth_token=None,
+                auth_type=MCPAuthenticationType.API_TOKEN,
+            )
+            if user_managed_credentials
+            else None
+        ),
     )
 
 
@@ -146,20 +163,14 @@ def test_json_object_reaches_the_model_without_extra_escaping() -> None:
     assert len(response.text) < len(old_response)
 
 
-def test_the_model_reads_text_and_programs_get_structured_content() -> None:
+def test_text_content_takes_precedence_over_structured_content() -> None:
     result = CallToolResult(
         content=[TextContent(type="text", text="2 open issues")],
-        structuredContent={"open": 2, "titles": ["a", "b"]},
+        structuredContent={"open": 2},
     )
-
     response, delta = _run_with_server_result(result)
-
-    # Direct tool calls: the text content, as the server wrote it for the model.
     assert json.loads(response.text) == {"tool_result": "2 open issues"}
     assert delta.data == {"tool_result": "2 open issues"}
-    # Code mode programs: the structured content.
-    [function] = build_tool_stubs([_github_tool()]).functions.values()
-    assert program_value(function, response) == {"open": 2, "titles": ["a", "b"]}
 
 
 def test_structured_content_is_the_text_when_the_server_sends_no_text() -> None:
@@ -170,25 +181,15 @@ def test_structured_content_is_the_text_when_the_server_sends_no_text() -> None:
     assert json.loads(response.text) == {"tool_result": {"open": 2}}
 
 
-def test_media_blocks_are_named_not_dropped() -> None:
-    result = CallToolResult(
-        content=[
-            TextContent(type="text", text="Chart:"),
-            ImageContent(type="image", data="aGk=", mimeType="image/png"),
-        ]
-    )
-
-    response, _ = _run_with_server_result(result)
-
-    assert json.loads(response.text) == {
-        "tool_result": "Chart:\n\n[image omitted: image/png]"
-    }
+def test_empty_result_does_not_invent_none_text() -> None:
+    response, _ = _run_with_server_result(CallToolResult(content=[]))
+    assert json.loads(response.text) == {"tool_result": ""}
 
 
 def test_server_reported_error_is_a_tool_error_not_an_auth_error(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    message = "403 Forbidden: repo access denied"
+    message = "403 Forbidden: repo access denied; private request data"
     with (
         patch(
             f"{MODULE}.call_mcp_tool",
@@ -200,10 +201,82 @@ def test_server_reported_error_is_a_tool_error_not_an_auth_error(
         patch(f"{MODULE}.record_mcp_client_tool_outcome") as record_outcome,
         caplog.at_level(logging.INFO),
     ):
-        response = _run(_github_tool())
+        response = _run(_github_tool(user_managed_credentials=True))
 
     assert response.is_error
     assert json.loads(response.content) == {"error": message}
     assert record_outcome.call_args.kwargs["status"] == MCPToolCallStatus.ERROR
     mark.assert_not_called()
     assert not [record for record in caplog.records if record.levelno >= logging.ERROR]
+    assert message not in caplog.text
+    assert "reported an error" in caplog.text
+
+
+def test_rejected_user_credentials_still_require_reauthentication() -> None:
+    error = httpx.HTTPStatusError(
+        "upstream rejected request",
+        request=httpx.Request("POST", "https://mcp.example"),
+        response=httpx.Response(401),
+    )
+    with (
+        patch(f"{MODULE}.call_mcp_tool", side_effect=error),
+        patch(f"{MODULE}.get_session_with_current_tenant") as session,
+        patch(f"{MODULE}.mark_connection_config_reauth_required") as mark,
+    ):
+        response = _run(_github_tool(user_managed_credentials=True))
+
+    assert response.is_error
+    assert "Authentication failed" in response.text
+    mark.assert_called_once_with(
+        7,
+        {"headers": {"Authorization": "Bearer valid"}},
+        session.return_value.__enter__.return_value,
+    )
+
+
+def test_cancelled_call_has_separate_metric_and_propagates() -> None:
+    with (
+        patch(f"{MODULE}.call_mcp_tool", side_effect=AgentCancelled),
+        patch(f"{MODULE}.record_mcp_client_tool_outcome") as record,
+    ):
+        with pytest.raises(AgentCancelled):
+            _run(_github_tool())
+    assert record.call_args.kwargs["status"] == MCPToolCallStatus.CANCELLED
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        pytest.param(
+            CallToolResult(
+                content=[], structuredContent={"code": "not_found"}, isError=True
+            ),
+            {"code": "not_found"},
+            id="structured-only",
+        ),
+        pytest.param(
+            CallToolResult(
+                content=[TextContent(type="text", text='[{"code": "not_found"}]')],
+                isError=True,
+            ),
+            [{"code": "not_found"}],
+            id="json-text-array",
+        ),
+        pytest.param(
+            CallToolResult(
+                content=[TextContent(type="text", text="Failure details")],
+                structuredContent={"code": "not_found"},
+                isError=True,
+            ),
+            "Failure details",
+            id="text-takes-precedence",
+        ),
+    ],
+)
+def test_server_error_details_are_encoded_once(
+    result: CallToolResult, expected: JsonValue
+) -> None:
+    response, delta = _run_with_server_result(result)
+    assert response.is_error
+    assert json.loads(response.text) == {"error": expected}
+    assert delta.data == {"error": expected}

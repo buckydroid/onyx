@@ -13,12 +13,12 @@ from onyx.db.enums import (
 )
 from onyx.db.mcp import mark_connection_config_reauth_required
 from onyx.db.models import MCPConnectionConfig, MCPServer
+from onyx.llm.cancellation import AgentCancelled
 from onyx.llm.models import ToolDefinition, ToolResult
 from onyx.server.features.mcp.client import (
     call_mcp_tool,
     has_unauthorized_response,
     mcp_result_value,
-    process_mcp_result,
 )
 from onyx.server.features.mcp.credentials import (
     ResolvedMCPCredentials,
@@ -172,7 +172,7 @@ class MCPTool(Tool):
             parameters=_normalize_parameters_schema(self._tool_definition),
         )
 
-    def _error_result(self, message: str) -> ToolResult:
+    def _error_result(self, message: JsonValue) -> ToolResult:
         error_result = {"error": message}
         return ToolResult(
             details=CustomToolCallSummary(
@@ -268,8 +268,8 @@ class MCPTool(Tool):
             if tool_result.isError:
                 # The server ran the tool and reported a failure; this is not a
                 # connection or authentication problem.
-                message = process_mcp_result(tool_result)
-                logger.info("MCP tool '%s' reported an error: %s", self._name, message)
+                message = mcp_result_value(tool_result)
+                logger.info("MCP tool '%s' reported an error", self._name)
                 return self._error_result(message)
 
             logger.info("MCP tool '%s' executed successfully", self._name)
@@ -287,6 +287,9 @@ class MCPTool(Tool):
             outcome = MCPToolCallStatus.SUCCESS
             return response
 
+        except AgentCancelled:
+            outcome = MCPToolCallStatus.CANCELLED
+            raise
         except Exception as e:
             credentials = self._resolved_credentials
             unauthorized_response = has_unauthorized_response(e)
