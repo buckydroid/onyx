@@ -261,7 +261,7 @@ covers new files that match it.
 | `web/src/app/app/components/files/`, `web/src/sections/modals/UserFilesModal.tsx`, `web/src/sections/cards/FileCard.tsx` | file-store-and-user-files |
 | `web/src/sections/modals/PreviewModal/` | chat-frontend |
 | `web/src/app/app/agents/` | chat-frontend, agents-personas |
-| `web/src/app/app/plugins/` | plugins, chat-frontend |
+| `web/src/app/app/plugins/`, `web/src/views/PluginsPage/` | plugins, chat-frontend |
 | `web/src/app/app/settings/llm-gateway/` | llm-gateway |
 | `web/src/app/app/settings/usage/` | observability |
 | `web/src/views/SettingsPage.tsx` | chat-preferences |
